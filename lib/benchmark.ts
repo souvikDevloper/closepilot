@@ -1,4 +1,5 @@
 import type { RawRecord, ReconciliationInput } from './reconciliation.ts';
+import { parseMoney } from './money.ts';
 
 const iso = (minutes: number) => new Date(Date.UTC(2026, 7, 21, 4, 0) + minutes * 60_000).toISOString();
 
@@ -7,6 +8,7 @@ export interface BenchmarkDataset extends ReconciliationInput {
   settlements: RawRecord[];
   bank_transactions: RawRecord[];
   invoices: RawRecord[];
+  settlement_recon_items: RawRecord[];
   ground_truth: Array<{ left_id: string; right_id: string }>;
 }
 
@@ -21,6 +23,7 @@ export function createBenchmarkDataset(scale = 1): BenchmarkDataset {
   const invoices: RawRecord[] = [];
   const settlements: RawRecord[] = [];
   const bankTransactions: RawRecord[] = [];
+  const settlementReconItems: RawRecord[] = [];
   const groundTruth: Array<{ left_id: string; right_id: string }> = [];
 
   for (let index = 0; index < paymentPairs; index += 1) {
@@ -81,6 +84,12 @@ export function createBenchmarkDataset(scale = 1): BenchmarkDataset {
     }
     settlements.push(settlement);
     bankTransactions.push(bank);
+    const netMinor = parseMoney(String(amount), 'INR').minor;
+    const refundMinor = BigInt(500 + (index % 17) * 25);
+    settlementReconItems.push(
+      { entity_id:`entity_holdout_payment_${index + 1}`, settlement_id:settlementId, type:'payment', credit:Number(netMinor + refundMinor), debit:0, fee:200, tax:36, currency:'INR' },
+      { entity_id:`entity_holdout_refund_${index + 1}`, settlement_id:settlementId, type:'refund', credit:0, debit:Number(refundMinor), fee:0, tax:0, currency:'INR' },
+    );
     groundTruth.push({ left_id:settlementId, right_id:bankId });
   }
 
@@ -99,9 +108,12 @@ export function createBenchmarkDataset(scale = 1): BenchmarkDataset {
 
   // Unmatched settlements and bank credits prove the engine does not force a match.
   for (let index = 0; index < 5 * scale; index += 1) {
-    settlements.push({ id:`setl_unmatched_${index + 1}`, utr:`UTR_UNMATCHED_S_${index + 1}`, amount:900_000 + index * 9_001, created_at:iso(3_000 + index) });
+    const settlementId = `setl_unmatched_${index + 1}`;
+    const amount = 900_000 + index * 9_001;
+    settlements.push({ id:settlementId, utr:`UTR_UNMATCHED_S_${index + 1}`, amount, created_at:iso(3_000 + index) });
     bankTransactions.push({ id:`bank_unmatched_${index + 1}`, utr:`UTR_UNMATCHED_B_${index + 1}`, amount:1_300_000 + index * 7_003, posted_at:iso(6_000 + index), narration:'unidentified NEFT receipt' });
+    settlementReconItems.push({ entity_id:`entity_holdout_unmatched_${index + 1}`, settlement_id:settlementId, type:'payment', credit:Number(parseMoney(String(amount), 'INR').minor), debit:0, fee:200, tax:36, currency:'INR' });
   }
 
-  return { payments, settlements, bank_transactions:bankTransactions, invoices, ground_truth:groundTruth };
+  return { payments, settlements, bank_transactions:bankTransactions, invoices, settlement_recon_items:settlementReconItems, ground_truth:groundTruth };
 }

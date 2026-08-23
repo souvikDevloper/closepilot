@@ -2,43 +2,176 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ClosePilot Reconciliation API",
-    "version": "2.0.0",
-    "description": "Explainable, fail-closed reconciliation for Razorpay payments, settlements, invoices and bank transactions."
+    "version": "3.0.0",
+    "description": "Fail-closed finance-ops reconciliation with exact minor-unit arithmetic, aggregate Razorpay settlement proofing, deterministic decisions and independent SHA-256 verification receipts. This self-hosted specification is free to import into Postman, Insomnia or an API client generator."
   },
+  "servers": [{ "url": "/", "description": "Current ClosePilot deployment" }],
   "paths": {
-    "/api/reconcile": {
-      "get": { "summary": "Read API usage and limits", "responses": { "200": { "description": "API documentation" } } },
+    "/api/v1/reconcile": {
+      "get": {
+        "operationId": "getReconciliationUsage",
+        "summary": "Read API usage and limits",
+        "responses": { "200": { "description": "Usage document", "content": { "application/json": { "schema": { "type": "object" } } } } }
+      },
       "post": {
-        "summary": "Run a reconciliation batch",
-        "parameters": [{ "name": "Idempotency-Key", "in": "header", "required": false, "schema": { "type": "string" } }],
+        "operationId": "reconcileBatch",
+        "summary": "Reconcile one bounded finance-ops batch",
+        "description": "Matches payments to invoices and settlements to bank credits. If settlement_recon_items are supplied, their aggregate net must exactly close to each settlement before it may auto-match.",
+        "security": [{ "ApiKeyAuth": [] }, {}],
+        "parameters": [
+          { "name": "Idempotency-Key", "in": "header", "required": false, "description": "Visible ASCII, at most 128 characters.", "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "payments": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-                  "invoices": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-                  "settlements": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-                  "bank_transactions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-                  "ground_truth": { "type": "array", "items": { "type": "object", "required": ["left_id", "right_id"], "properties": { "left_id": { "type": "string" }, "right_id": { "type": "string" } } } },
-                  "response_mode": { "type": "string", "enum": ["full", "summary"] },
-                  "benchmark": { "type": "boolean" }
+              "schema": { "$ref": "#/components/schemas/ReconciliationRequest" },
+              "examples": {
+                "payment_to_invoice": {
+                  "value": {
+                    "payments": [{ "id": "pay_001", "invoice_id": "inv_001", "amount": "12500.00", "currency": "INR", "created_at": "2026-08-21T10:00:00Z" }],
+                    "invoices": [{ "id": "inv_001", "payment_id": "pay_001", "amount": "12500.00", "currency": "INR", "date": "2026-08-21T10:01:00Z" }]
+                  }
+                },
+                "razorpay_settlement_proof": {
+                  "value": {
+                    "settlements": [{ "id": "setl_001", "utr": "UTR001", "amount": "950.00", "currency": "INR" }],
+                    "bank_transactions": [{ "id": "bank_001", "utr": "UTR001", "credit": "950.00", "currency": "INR" }],
+                    "settlement_recon_items": [
+                      { "entity_id": "pay_001", "settlement_id": "setl_001", "credit": 100000, "debit": 0, "fee": 2000, "tax": 360, "currency": "INR" },
+                      { "entity_id": "rfnd_001", "settlement_id": "setl_001", "credit": 0, "debit": 5000, "fee": 0, "tax": 0, "currency": "INR" }
+                    ]
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "description": "Measured matches, exceptions, source coverage, audit trail and evaluation metrics" },
-          "400": { "description": "Invalid input" },
-          "413": { "description": "Batch or response exceeds endpoint limit" }
+          "200": {
+            "description": "Measured decisions, exceptions, aggregate closures and independent verification receipt",
+            "headers": {
+              "X-ClosePilot-Run-Id": { "schema": { "type": "string" } },
+              "X-Engine-Version": { "schema": { "type": "string" } },
+              "X-Verification-Receipt": { "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReconciliationResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "500": { "$ref": "#/components/responses/VerificationFailure" }
         }
       }
     },
-    "/api/health": { "get": { "summary": "Health check", "responses": { "200": { "description": "Service is healthy" } } } }
-    ,
-    "/api/benchmark": { "get": { "summary": "Download the labelled 1,000-record holdout dataset", "responses": { "200": { "description": "Benchmark dataset with ground truth" } } } }
+    "/api/reconcile": {
+      "get": { "summary": "Legacy unversioned alias", "deprecated": true, "responses": { "200": { "description": "Usage document" } } },
+      "post": {
+        "summary": "Legacy unversioned alias",
+        "deprecated": true,
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReconciliationRequest" } } } },
+        "responses": { "200": { "description": "Same response as /api/v1/reconcile", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReconciliationResult" } } } } }
+      }
+    },
+    "/api/health": { "get": { "operationId": "healthCheck", "summary": "Read service and engine health", "responses": { "200": { "description": "Service is healthy" } } } },
+    "/api/benchmark": {
+      "get": {
+        "operationId": "downloadBenchmark",
+        "summary": "Download labelled synthetic holdout data",
+        "parameters": [{ "name": "scale", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 10, "default": 1 } }],
+        "responses": { "200": { "description": "Benchmark JSON with ground truth" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": { "type": "apiKey", "in": "header", "name": "X-API-Key", "description": "Required only when CLOSEPILOT_API_KEY is configured." }
+    },
+    "schemas": {
+      "RawRecord": { "type": "object", "additionalProperties": true },
+      "GroundTruthPair": {
+        "type": "object", "additionalProperties": false, "required": ["left_id", "right_id"],
+        "properties": { "left_id": { "type": "string", "minLength": 1 }, "right_id": { "type": "string", "minLength": 1 } }
+      },
+      "ReconciliationOptions": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "auto_match_threshold": { "type": "number", "minimum": 85, "maximum": 99, "default": 85 },
+          "review_threshold": { "type": "number", "minimum": 0, "maximum": 99, "default": 55 },
+          "ambiguity_margin": { "type": "number", "minimum": 10, "maximum": 99, "default": 10 },
+          "amount_tolerance": { "type": "number", "minimum": 0, "maximum": 1000000, "default": 0, "description": "Major-unit review tolerance. It can surface a candidate but can never authorize an automatic match; auto-match always requires minor-unit equality." },
+          "date_window_days": { "type": "number", "minimum": 0, "maximum": 365, "default": 3 },
+          "max_candidate_bucket": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 64 }
+        }
+      },
+      "ReconciliationRequest": {
+        "type": "object",
+        "properties": {
+          "payments": { "type": "array", "items": { "$ref": "#/components/schemas/RawRecord" } },
+          "invoices": { "type": "array", "items": { "$ref": "#/components/schemas/RawRecord" } },
+          "settlements": { "type": "array", "items": { "$ref": "#/components/schemas/RawRecord" } },
+          "bank_transactions": { "type": "array", "items": { "$ref": "#/components/schemas/RawRecord" } },
+          "settlement_recon_items": { "type": "array", "description": "Razorpay recon rows; monetary fields are integer currency subunits.", "items": { "$ref": "#/components/schemas/RawRecord" } },
+          "ground_truth": { "type": "array", "items": { "$ref": "#/components/schemas/GroundTruthPair" } },
+          "options": { "$ref": "#/components/schemas/ReconciliationOptions" },
+          "response_mode": { "type": "string", "enum": ["full", "summary"], "default": "full" },
+          "benchmark": { "type": "boolean", "default": false },
+          "benchmark_scale": { "type": "integer", "minimum": 1, "maximum": 10, "default": 1 }
+        },
+        "anyOf": [
+          { "required": ["payments", "invoices"] },
+          { "required": ["settlements", "bank_transactions"] },
+          { "properties": { "benchmark": { "const": true } }, "required": ["benchmark"] }
+        ]
+      },
+      "Decision": {
+        "type": "object",
+        "required": ["id", "source", "amount", "amount_minor", "currency", "status", "confidence", "reason", "evidence", "domain"],
+        "properties": {
+          "id": { "type": "string" }, "source": { "type": "string" }, "reference": { "type": "string" },
+          "amount": { "type": "number" }, "amount_minor": { "type": "string", "pattern": "^-?[0-9]+$" }, "currency": { "type": "string" },
+          "status": { "type": "string", "enum": ["Matched", "Review", "Blocked"] }, "confidence": { "type": "number", "minimum": 0, "maximum": 99 },
+          "date": { "type": "string" }, "reason": { "type": "string" }, "action": { "type": "string" }, "evidence": { "type": "array", "items": { "type": "string" } },
+          "domain": { "type": "string", "enum": ["payment_to_invoice", "settlement_to_bank", "validation"] }, "matched_with": { "type": "string" }
+        }
+      },
+      "SettlementClosure": {
+        "type": "object",
+        "required": ["settlement_id", "status", "currency", "item_count", "credit_minor", "debit_minor", "net_minor", "expected_minor", "delta_minor", "evidence"],
+        "properties": {
+          "settlement_id": { "type": "string" }, "status": { "type": "string", "enum": ["Verified", "Review", "Blocked"] }, "currency": { "type": "string" }, "item_count": { "type": "integer" },
+          "credit_minor": { "type": "string" }, "debit_minor": { "type": "string" }, "net_minor": { "type": "string" }, "expected_minor": { "type": "string" }, "delta_minor": { "type": "string" },
+          "fee_minor": { "type": "string" }, "tax_minor": { "type": "string" }, "evidence": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "Verification": {
+        "type": "object", "required": ["status", "verifier_version", "receipt_sha256", "checked_matches", "invariants", "failures"],
+        "properties": {
+          "status": { "type": "string", "const": "PASS" }, "verifier_version": { "type": "string" }, "receipt_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "checked_matches": { "type": "integer" },
+          "invariants": { "type": "array", "items": { "type": "object", "required": ["code", "passed", "detail"], "properties": { "code": { "type": "string" }, "passed": { "type": "boolean" }, "detail": { "type": "string" } } } },
+          "failures": { "type": "array", "maxItems": 0, "items": { "type": "string" } }
+        }
+      },
+      "ReconciliationResult": {
+        "type": "object", "required": ["run_id", "engine_version", "ruleset", "generated_at", "checksum", "metrics", "matches", "exceptions", "settlement_closures", "verification", "agent_execution"],
+        "properties": {
+          "run_id": { "type": "string" }, "engine_version": { "type": "string" }, "ruleset": { "type": "string" }, "generated_at": { "type": "string", "format": "date-time" }, "checksum": { "type": "string" },
+          "metrics": { "type": "object", "additionalProperties": true }, "matches": { "type": "array", "items": { "$ref": "#/components/schemas/Decision" } }, "exceptions": { "type": "array", "items": { "$ref": "#/components/schemas/Decision" } },
+          "settlement_closures": { "type": "array", "items": { "$ref": "#/components/schemas/SettlementClosure" } }, "verification": { "$ref": "#/components/schemas/Verification" }, "agent_execution": { "type": "object", "additionalProperties": true },
+          "audit": { "type": "array", "items": { "type": "object" } }, "source_coverage": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "Error": { "type": "object", "required": ["error", "message"], "properties": { "error": { "type": "string" }, "message": { "type": "string" } } }
+    },
+    "responses": {
+      "BadRequest": { "description": "Malformed request", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": { "description": "API key required or invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "PayloadTooLarge": { "description": "Body, record count or full response exceeds a limit", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "UnsupportedMediaType": { "description": "Request is not JSON", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "UnprocessableEntity": { "description": "Unsafe or invalid options", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "VerificationFailure": { "description": "Independent verification failed; no result was released", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    }
   }
 }

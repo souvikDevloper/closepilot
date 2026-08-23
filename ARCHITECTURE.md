@@ -6,14 +6,16 @@ Minimize false automatic matches, expose every unresolved record and keep AI awa
 
 ## Execution pipeline
 
-1. **Schema guard** — validates stable IDs, amounts, source arrays and batch limits. Invalid rows become visible `validation` exceptions.
-2. **Canonical normalization** — maps common Razorpay, bank and ledger aliases into a currency- and merchant-scoped record model.
+1. **Schema guard** — validates stable IDs, ISO-style currency codes, exact amounts, source arrays, options and batch limits. Invalid rows become visible `validation` exceptions.
+2. **Exact canonical ledger** — maps common Razorpay, bank and ledger aliases into currency- and merchant-scoped records backed by integer minor units (`bigint`).
 3. **Narration model** — a measured local Naive Bayes classifier identifies settlement/refund/TDS/fee/payout intent from noisy bank text.
 4. **Bounded candidate generation** — builds hash indexes for identifiers, UTRs, orders, customers, email and amount buckets. High-collision buckets are refused.
 5. **Deterministic scoring** — evaluates direct references, UTRs, amount tolerance, date windows, customer identity, currency, merchant and record status.
 6. **Safety gate** — requires an auto-match threshold and a minimum margin over the runner-up. Ambiguity routes to human review.
-7. **Evaluation** — optional ground truth produces precision, recall, F1 and false-auto-match rate.
-8. **Audit output** — returns checksum, ruleset, evidence, source coverage, timing, exceptions and zero-drop integrity.
+7. **Aggregate settlement proof** — groups Razorpay recon rows by `settlement_id` and proves `sum(credit - debit) == settlement amount`. A one-subunit difference fails the release gate.
+8. **Independent verifier** — re-reads canonical match facts and checks one-to-one use, exact amount/currency/merchant safety, release thresholds, decision accounting and settlement proof.
+9. **Evaluation** — optional ground truth produces precision, recall, F1 and false-auto-match rate.
+10. **Verified release** — returns only after every invariant passes, with a deterministic run checksum and SHA-256 decision receipt.
 
 ## Complexity and scale
 
@@ -44,11 +46,15 @@ Upload/API → Schema registry → Object storage → Durable queue
 - Bank debit presented as settlement credit: hard reject.
 - Void/cancelled invoice: hard reject.
 - Duplicate or missing stable ID: validation exception.
+- Duplicate settlement entity evidence: every affected closure is withheld.
+- Non-exact aggregate settlement net: human review; settlement-to-bank auto-match is withheld.
 - Ambiguous top candidates: human review.
 - Low evidence: blocked.
 - Missing ground truth: accuracy metrics remain `null`.
 - No source mutation or money movement inside the evaluator API.
 - Every input becomes either a resolved record or a visible exception; silent drops must equal zero.
+- Mixed-currency value totals are never combined into a misleading number.
+- Any verifier failure aborts result release.
 
 ## AI boundary
 

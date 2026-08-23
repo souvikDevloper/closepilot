@@ -5,7 +5,9 @@ const scale = Math.max(1, Number(process.argv[2] ?? 100));
 const dataset = createBenchmarkDataset(scale);
 const result = reconcile(dataset);
 const summary = {
-  records: result.metrics.input_records,
+  primary_records: result.metrics.input_records,
+  settlement_recon_items:result.metrics.settlement_recon_items,
+  processed_records:result.metrics.processed_records,
   matched_pairs: result.metrics.matched_pairs,
   exceptions: result.metrics.exception_records,
   match_rate: `${(result.metrics.match_rate * 100).toFixed(2)}%`,

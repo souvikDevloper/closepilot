@@ -1,14 +1,24 @@
 import { classifyNarration, evaluateNarrationClassifier } from './narration-classifier.ts';
+import { currencyExponent, minorToDecimal, minorToNumber, parseMoney, toleranceToMinor } from './money.ts';
+import { sha256 } from './sha256.ts';
 
 export type RawRecord = Record<string, unknown>;
 export type RecordSource = 'Razorpay payment' | 'Razorpay settlement' | 'Bank statement' | 'Invoice ledger';
 export type DecisionStatus = 'Matched' | 'Review' | 'Blocked';
+
+export class ReconciliationInputError extends Error {
+  constructor(message:string) {
+    super(message);
+    this.name = 'ReconciliationInputError';
+  }
+}
 
 export interface ReconciliationInput {
   payments?: RawRecord[];
   settlements?: RawRecord[];
   bank_transactions?: RawRecord[];
   invoices?: RawRecord[];
+  settlement_recon_items?: RawRecord[];
   ground_truth?: Array<{ left_id: string; right_id: string }>;
   options?: Partial<ReconciliationOptions>;
 }
@@ -27,6 +37,8 @@ export interface DecisionRecord {
   source: string;
   reference: string;
   amount: number;
+  amount_minor: string;
+  currency: string;
   status: DecisionStatus;
   confidence: number;
   date: string;
@@ -39,14 +51,19 @@ export interface DecisionRecord {
 
 export interface ReconciliationMetrics {
   input_records: number;
+  processed_records: number;
   normalized_records: number;
+  settlement_recon_items: number;
   matched_pairs: number;
   matched_records: number;
   review_records: number;
   blocked_records: number;
   exception_records: number;
   match_rate: number;
-  value_reconciled: number;
+  value_reconciled: number | null;
+  value_reconciled_minor: string;
+  value_reconciled_decimal: string;
+  value_reconciled_by_currency: Array<{ currency:string; minor:string; decimal:string }>;
   duration_ms: number;
   throughput_records_per_second: number;
   precision: number | null;
@@ -56,6 +73,30 @@ export interface ReconciliationMetrics {
   ground_truth_pairs: number;
   silent_drops: number;
   narration_classifier_accuracy: number;
+}
+
+export interface VerificationResult {
+  status: 'PASS' | 'FAIL';
+  verifier_version: string;
+  receipt_sha256: string;
+  checked_matches: number;
+  invariants: Array<{ code:string; passed:boolean; detail:string }>;
+  failures: string[];
+}
+
+export interface SettlementClosure {
+  settlement_id: string;
+  status: 'Verified' | 'Review' | 'Blocked';
+  currency: string;
+  item_count: number;
+  credit_minor: string;
+  debit_minor: string;
+  net_minor: string;
+  expected_minor: string;
+  delta_minor: string;
+  fee_minor: string;
+  tax_minor: string;
+  evidence: string[];
 }
 
 export interface ReconciliationResult {
@@ -69,12 +110,23 @@ export interface ReconciliationResult {
   exceptions: DecisionRecord[];
   audit: Array<{ time: string; title: string; copy: string; tone: 'done' | 'warn' | 'ai' | 'neutral' }>;
   source_coverage: Array<{ source: string; total: number; resolved: number; rate: number }>;
+  settlement_closures: SettlementClosure[];
+  verification: VerificationResult;
+  agent_execution: {
+    model: 'bounded_autonomous_state_machine';
+    mode: 'read_only';
+    status: 'COMPLETED';
+    release_policy: 'verify_before_release';
+    stages: Array<{ stage:string; status:'PASS'; records_in:number; records_out:number; detail:string }>;
+  };
 }
 
 interface CanonicalRecord {
   id: string;
   source: RecordSource;
   amount: number;
+  amountMinor: bigint;
+  amountExponent: number;
   date: number | null;
   dateLabel: string;
   orderId: string;
@@ -99,6 +151,7 @@ interface Candidate {
   score: number;
   evidence: string[];
   reason: string;
+  autoEligible: boolean;
 }
 
 interface DomainResult {
@@ -107,13 +160,14 @@ interface DomainResult {
   resolvedIds: Set<string>;
 }
 
-const ENGINE_VERSION = '2.0.0';
-const RULESET = 'closepilot-reconcile-v2';
+const ENGINE_VERSION = '3.0.0';
+const RULESET = 'closepilot-reconcile-v3';
+const VERIFIER_VERSION = 'closepilot-verifier-v1';
 const DEFAULTS: ReconciliationOptions = {
   auto_match_threshold: 85,
   review_threshold: 55,
   ambiguity_margin: 10,
-  amount_tolerance: 1,
+  amount_tolerance: 0,
   date_window_days: 3,
   max_candidate_bucket: 64,
 };
@@ -121,6 +175,12 @@ const DEFAULTS: ReconciliationOptions = {
 const key = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
 const text = (value: unknown) => value == null ? '' : String(value).trim();
 const normalizedHeader = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+const normalizedDirection = (value:unknown) => {
+  const direction = text(value).toLowerCase();
+  if (['d','debit','dr','outflow','withdrawal'].includes(direction)) return 'debit';
+  if (['c','credit','cr','inflow','deposit'].includes(direction)) return 'credit';
+  return direction;
+};
 
 function indexedRow(row: RawRecord) {
   const result = new Map<string, unknown>();
@@ -134,15 +194,6 @@ function pick(row: Map<string, unknown>, aliases: string[]) {
     if (value !== undefined && value !== null && text(value) !== '') return value;
   }
   return undefined;
-}
-
-function parseAmount(value: unknown, isPaise = false) {
-  if (value === undefined || value === null || value === '') return Number.NaN;
-  const normalized = typeof value === 'number' ? value : String(value).replace(/[^0-9.-]/g, '');
-  if (typeof normalized === 'string' && !/[0-9]/.test(normalized)) return Number.NaN;
-  const parsed = typeof normalized === 'number' ? normalized : Number(normalized);
-  if (!Number.isFinite(parsed)) return Number.NaN;
-  return Math.abs(isPaise ? parsed / 100 : parsed);
 }
 
 function parseDate(value: unknown): number | null {
@@ -163,38 +214,81 @@ function dateLabel(timestamp: number | null) {
 function normalizeRows(rows: RawRecord[], source: RecordSource) {
   const records: CanonicalRecord[] = [];
   const exceptions: DecisionRecord[] = [];
-  const seen = new Set<string>();
+  const idAliases = source === 'Razorpay payment'
+    ? ['id','payment_id','paymentid','razorpay_payment_id','transaction_id','txnid','txn_id']
+    : source === 'Razorpay settlement'
+      ? ['id','settlement_id','settlementid','razorpay_settlement_id','batch_id']
+      : source === 'Bank statement'
+        ? ['id','transaction_id','bank_transaction_id','txnid','txn_id','bank_reference','reference_id','reference_number','reference_no','utr','utr_number']
+        : ['id','invoice_id','invoiceid','document_number','document_no','invoice_number'];
+  const idCounts = new Map<string,number>();
+  for (const raw of rows) {
+    const rawId = text(pick(indexedRow(raw), idAliases));
+    if (rawId) idCounts.set(key(rawId), (idCounts.get(key(rawId)) ?? 0) + 1);
+  }
   rows.forEach((raw, originalIndex) => {
     const row = indexedRow(raw);
-    const idAliases = source === 'Razorpay payment'
-      ? ['id','payment_id','paymentid','transaction_id','txnid']
-      : source === 'Razorpay settlement'
-        ? ['id','settlement_id','settlementid','batch_id']
-        : source === 'Bank statement'
-          ? ['id','transaction_id','txnid','bank_reference','reference_id','utr']
-          : ['id','invoice_id','invoiceid','document_number','invoice_number'];
     const rawId = text(pick(row, idAliases));
-    const id = rawId || `invalid_${key(source)}_${originalIndex + 1}`;
+    const duplicate = rawId ? (idCounts.get(key(rawId)) ?? 0) > 1 : false;
+    const id = duplicate ? `${rawId}#duplicate_${originalIndex + 1}` : rawId || `invalid_${key(source)}_${originalIndex + 1}`;
+    const currency = text(pick(row, ['currency','currency_code','ccy']) ?? 'INR').toUpperCase();
+    const currencyFailure = /^[A-Z]{3}$/.test(currency) ? '' : 'currency must be a three-letter ISO-style code';
     const amountAliases = source === 'Razorpay settlement'
-      ? ['net_amount','settlement_amount','amount','amount_paise']
+      ? ['net_amount','net_settlement_amount','settlement_amount','settled_amount','amount','amount_minor','amount_subunits','amount_paise']
       : source === 'Bank statement'
-        ? ['credit','deposit','transaction_amount','amount','amount_paise']
+        ? ['credit','credit_amount','deposit','deposit_amount','debit','debit_amount','withdrawal','transaction_amount','amount','amount_minor','amount_subunits','amount_paise']
         : source === 'Invoice ledger'
-          ? ['grand_total','invoice_amount','total','amount','amount_paise']
-          : ['payment_amount','amount','amount_paise'];
-    const amountEntry = pick(row, amountAliases);
-    const amountIsPaise = row.has('amountpaise') && amountEntry === row.get('amountpaise');
-    const amount = parseAmount(amountEntry, amountIsPaise);
-    const timestamp = parseDate(pick(row, ['created_at','createdat','date','transaction_date','posted_at','paid_at','issued_at','timestamp']));
-    const duplicate = rawId ? seen.has(key(rawId)) : false;
-    if (rawId) seen.add(key(rawId));
-    if (!rawId || !Number.isFinite(amount) || duplicate) {
-      const failures = [!rawId ? 'missing stable record ID' : '', !Number.isFinite(amount) ? 'invalid amount' : '', duplicate ? 'duplicate record ID' : ''].filter(Boolean);
+          ? ['grand_total','invoice_amount','amount_due','gross_amount','total','amount','amount_minor','amount_subunits','amount_paise']
+          : ['payment_amount','captured_amount','gross_amount','amount','amount_minor','amount_subunits','amount_paise'];
+    let amountEntry = pick(row, amountAliases);
+    let inferredBankDirection = '';
+    if (source === 'Bank statement') {
+      const explicitDirection = normalizedDirection(pick(row, ['type','direction','debit_credit','credit_debit_indicator','dr_cr','transaction_type']));
+      const creditEntry = pick(row, ['credit','credit_amount','deposit','deposit_amount']);
+      const debitEntry = pick(row, ['debit','debit_amount','withdrawal']);
+      const nonZero = (value:unknown) => {
+        try { return value !== undefined && parseMoney(value, currency).minor !== 0n; }
+        catch { return false; }
+      };
+      if (explicitDirection === 'debit' && debitEntry !== undefined) { amountEntry = debitEntry; inferredBankDirection = 'debit'; }
+      else if (nonZero(creditEntry)) { amountEntry = creditEntry; inferredBankDirection = 'credit'; }
+      else if (debitEntry !== undefined) { amountEntry = debitEntry; inferredBankDirection = 'debit'; }
+    }
+    const declaredUnit = text(pick(row, ['amount_unit','amountunit','unit'])).toLowerCase();
+    const implicitMinorField = ['amountminor','amountsubunits','amountpaise'].some((name) => row.has(name) && amountEntry === row.get(name));
+    let unitFailure = declaredUnit && !['major','minor','subunit','subunits','paise'].includes(declaredUnit)
+      ? 'amount_unit must be major, minor, subunit or paise'
+      : '';
+    if (declaredUnit === 'major' && implicitMinorField) unitFailure = 'amount_unit major conflicts with the selected minor-unit amount field';
+    const entity = text(pick(row, ['entity'])).toLowerCase();
+    const officialRazorpayEntity = (source === 'Razorpay payment' && entity === 'payment')
+      || (source === 'Razorpay settlement' && entity === 'settlement')
+      || (source === 'Invoice ledger' && entity === 'invoice');
+    const isMinorEntry = implicitMinorField
+      || ['minor','subunit','subunits','paise'].includes(declaredUnit)
+      || (!declaredUnit && officialRazorpayEntity);
+    let parsedAmount: ReturnType<typeof parseMoney> | null = null;
+    let amountFailure = '';
+    try {
+      parsedAmount = parseMoney(amountEntry, currency, isMinorEntry);
+      if (parsedAmount.minor === 0n) amountFailure = 'amount must be greater than zero';
+    } catch (error) {
+      amountFailure = error instanceof Error ? error.message : 'invalid amount';
+    }
+    const signedMinor = parsedAmount?.minor ?? 0n;
+    const amountMinor = signedMinor < 0n ? -signedMinor : signedMinor;
+    const amountExponent = parsedAmount?.exponent ?? currencyExponent(currency);
+    const amount = minorToNumber(amountMinor, amountExponent);
+    const timestamp = parseDate(pick(row, ['created_at','createdat','date','transaction_date','transaction_datetime','value_date','posted_at','paid_at','issued_at','settled_at','timestamp']));
+    if (!rawId || !parsedAmount || amountFailure || currencyFailure || unitFailure || duplicate) {
+      const failures = [!rawId ? 'missing stable record ID' : '', amountFailure ? `invalid amount: ${amountFailure}` : '', currencyFailure, unitFailure, duplicate ? 'duplicate record ID' : ''].filter(Boolean);
       exceptions.push({
         id,
         source,
         reference: '—',
-        amount: Number.isFinite(amount) ? amount : 0,
+        amount: parsedAmount ? amount : 0,
+        amount_minor: parsedAmount ? amountMinor.toString() : '0',
+        currency,
         status: 'Blocked',
         confidence: 0,
         date: dateLabel(timestamp),
@@ -209,21 +303,25 @@ function normalizeRows(rows: RawRecord[], source: RecordSource) {
       id,
       source,
       amount,
+      amountMinor,
+      amountExponent,
       date: timestamp,
       dateLabel: dateLabel(timestamp),
-      orderId: text(pick(row, ['order_id','orderid','merchant_order_id'])),
-      invoiceId: text(pick(row, ['invoice_id','invoiceid','invoice_number'])),
-      paymentId: text(pick(row, ['payment_id','paymentid','razorpay_payment_id'])),
-      settlementId: text(pick(row, ['settlement_id','settlementid','batch_id'])),
-      utr: text(pick(row, ['utr','bank_utr','settlement_utr','rrn'])),
+      orderId: text(pick(row, ['order_id','orderid','razorpay_order_id','merchant_order_id'])),
+      invoiceId: text(pick(row, ['invoice_id','invoiceid','invoice_number','invoice_reference'])),
+      paymentId: text(pick(row, ['payment_id','paymentid','razorpay_payment_id','payment_reference'])),
+      settlementId: text(pick(row, ['settlement_id','settlementid','razorpay_settlement_id','batch_id'])),
+      utr: text(pick(row, ['utr','utr_number','bank_utr','settlement_utr','bank_reference_number','reference_number','rrn'])),
       email: text(pick(row, ['email','customer_email','buyer_email'])).toLowerCase(),
       customerId: text(pick(row, ['customer_id','customerid','account_id','merchant_customer_id'])),
-      reference: text(pick(row, ['reference','reference_id','notes','description','bank_reference','order_reference'])),
+      reference: text(pick(row, ['reference','reference_id','reference_no','transaction_reference','notes','description','bank_reference','order_reference'])),
       narration: text(pick(row, ['narration','description','remarks','notes','particulars'])),
       status: text(pick(row, ['status','state','invoice_status'])).toLowerCase(),
-      currency: text(pick(row, ['currency','currency_code','ccy']) ?? 'INR').toUpperCase(),
-      merchantId: text(pick(row, ['merchant_id','merchantid','account_id','business_id'])),
-      direction: text(pick(row, ['type','direction','debit_credit','transaction_type'])).toLowerCase(),
+      currency,
+      merchantId: text(pick(row, ['merchant_id','merchantid','merchant_account_id','account_id','business_id'])),
+      direction: normalizedDirection(pick(row, ['type','direction','debit_credit','credit_debit_indicator','dr_cr','transaction_type']))
+        || inferredBankDirection
+        || (signedMinor < 0n ? 'debit' : ''),
       originalIndex,
     });
   });
@@ -236,8 +334,10 @@ const addIndex = (index: Map<string, CanonicalRecord[]>, indexKey: string, recor
   if (bucket) bucket.push(record); else index.set(indexKey, [record]);
 };
 
-function amountBucket(amount: number, tolerance: number) {
-  return String(Math.round(amount / Math.max(tolerance, 0.01)));
+const absMinor = (value: bigint) => value < 0n ? -value : value;
+
+function amountBucket(amountMinor: bigint, toleranceMinor: bigint) {
+  return amountMinor / (toleranceMinor > 0n ? toleranceMinor : 1n);
 }
 
 function scopeKey(record: CanonicalRecord) {
@@ -257,35 +357,42 @@ function containsToken(haystack: string, needle: string) {
 function scorePaymentInvoice(payment: CanonicalRecord, invoice: CanonicalRecord, options: ReconciliationOptions): Candidate {
   let score = 0;
   const evidence: string[] = [];
-  if (payment.currency && invoice.currency && payment.currency !== invoice.currency) return { left:payment,right:invoice,score:0,evidence:['Currency mismatch'],reason:'Currency mismatch' };
-  if (payment.merchantId && invoice.merchantId && key(payment.merchantId) !== key(invoice.merchantId)) return { left:payment,right:invoice,score:0,evidence:['Merchant scope mismatch'],reason:'Merchant scope mismatch' };
+  if (payment.currency && invoice.currency && payment.currency !== invoice.currency) return { left:payment,right:invoice,score:0,evidence:['Currency mismatch'],reason:'Currency mismatch',autoEligible:false };
+  if (payment.merchantId && invoice.merchantId && key(payment.merchantId) !== key(invoice.merchantId)) return { left:payment,right:invoice,score:0,evidence:['Merchant scope mismatch'],reason:'Merchant scope mismatch',autoEligible:false };
   const direct = key(payment.invoiceId) === key(invoice.id) || key(invoice.paymentId) === key(payment.id);
   if (direct) { score += 70; evidence.push('Direct payment ↔ invoice identifier'); }
   if (payment.orderId && invoice.orderId && key(payment.orderId) === key(invoice.orderId)) { score += 42; evidence.push('Order ID exact'); }
   if (containsToken(payment.reference, invoice.id) || containsToken(invoice.reference, payment.id)) { score += 40; evidence.push('Cross-reference exact'); }
-  const variance = Math.abs(payment.amount - invoice.amount);
-  if (variance <= options.amount_tolerance) { score += 25; evidence.push('Amount exact within tolerance'); }
-  else if (variance / Math.max(payment.amount, invoice.amount, 1) <= 0.005) { score += 12; evidence.push('Amount within 0.5%'); }
+  const variance = absMinor(payment.amountMinor - invoice.amountMinor);
+  const tolerance = toleranceToMinor(options.amount_tolerance, payment.amountExponent);
+  const amountSafe = variance === 0n;
+  if (amountSafe) { score += 25; evidence.push('Amount exact to the minor unit'); }
+  else if (variance <= tolerance) { score += 15; evidence.push('Amount inside configured review tolerance (never auto-authorizing)'); }
+  else if (variance * 1_000n <= (payment.amountMinor > invoice.amountMinor ? payment.amountMinor : invoice.amountMinor) * 5n) { score += 12; evidence.push('Amount within 0.5% (review only)'); }
   if (payment.email && invoice.email && payment.email === invoice.email) { score += 12; evidence.push('Customer email exact'); }
   if (payment.customerId && invoice.customerId && key(payment.customerId) === key(invoice.customerId)) { score += 12; evidence.push('Customer ID exact'); }
   const dayGap = daysBetween(payment.date, invoice.date);
   if (dayGap <= 1) { score += 10; evidence.push('Date within 24 hours'); }
   else if (dayGap <= options.date_window_days) { score += 5; evidence.push(`Date within ${options.date_window_days} days`); }
-  if (['void','voided','cancelled','canceled'].includes(invoice.status)) { score -= 80; evidence.push('Invoice is void or cancelled'); }
-  return { left: payment, right: invoice, score: Math.max(0, Math.min(99, score)), evidence, reason: evidence.join(' · ') };
+  const invalidStatus = ['void','voided','cancelled','canceled'].includes(invoice.status);
+  if (invalidStatus) { score -= 80; evidence.push('Invoice is void or cancelled'); }
+  return { left: payment, right: invoice, score: Math.max(0, Math.min(99, score)), evidence, reason: evidence.join(' · '), autoEligible:amountSafe && !invalidStatus };
 }
 
 function scoreSettlementBank(settlement: CanonicalRecord, bank: CanonicalRecord, options: ReconciliationOptions): Candidate {
   let score = 0;
   const evidence: string[] = [];
-  if (settlement.currency && bank.currency && settlement.currency !== bank.currency) return { left:settlement,right:bank,score:0,evidence:['Currency mismatch'],reason:'Currency mismatch' };
-  if (settlement.merchantId && bank.merchantId && key(settlement.merchantId) !== key(bank.merchantId)) return { left:settlement,right:bank,score:0,evidence:['Merchant scope mismatch'],reason:'Merchant scope mismatch' };
-  if (['debit','dr','outflow'].includes(bank.direction)) return { left:settlement,right:bank,score:0,evidence:['Bank transaction is not a credit'],reason:'Bank transaction is not a credit' };
+  if (settlement.currency && bank.currency && settlement.currency !== bank.currency) return { left:settlement,right:bank,score:0,evidence:['Currency mismatch'],reason:'Currency mismatch',autoEligible:false };
+  if (settlement.merchantId && bank.merchantId && key(settlement.merchantId) !== key(bank.merchantId)) return { left:settlement,right:bank,score:0,evidence:['Merchant scope mismatch'],reason:'Merchant scope mismatch',autoEligible:false };
+  if (['debit','dr','outflow'].includes(bank.direction)) return { left:settlement,right:bank,score:0,evidence:['Bank transaction is not a credit'],reason:'Bank transaction is not a credit',autoEligible:false };
   if (settlement.utr && bank.utr && key(settlement.utr) === key(bank.utr)) { score += 70; evidence.push('UTR exact'); }
   if (containsToken(bank.reference, settlement.id) || containsToken(bank.narration, settlement.id) || containsToken(settlement.reference, bank.id)) { score += 55; evidence.push('Settlement reference found in bank feed'); }
-  const variance = Math.abs(settlement.amount - bank.amount);
-  if (variance <= options.amount_tolerance) { score += 25; evidence.push('Net amount exact within tolerance'); }
-  else if (variance / Math.max(settlement.amount, bank.amount, 1) <= 0.0025) { score += 12; evidence.push('Net amount within 0.25%'); }
+  const variance = absMinor(settlement.amountMinor - bank.amountMinor);
+  const tolerance = toleranceToMinor(options.amount_tolerance, settlement.amountExponent);
+  const amountSafe = variance === 0n;
+  if (amountSafe) { score += 25; evidence.push('Net amount exact to the minor unit'); }
+  else if (variance <= tolerance) { score += 15; evidence.push('Net amount inside configured review tolerance (never auto-authorizing)'); }
+  else if (variance * 10_000n <= (settlement.amountMinor > bank.amountMinor ? settlement.amountMinor : bank.amountMinor) * 25n) { score += 12; evidence.push('Net amount within 0.25% (review only)'); }
   const dayGap = daysBetween(settlement.date, bank.date);
   if (dayGap <= 1) { score += 10; evidence.push('Credit inside settlement window'); }
   else if (dayGap <= options.date_window_days) { score += 5; evidence.push(`Credit within ${options.date_window_days} days`); }
@@ -294,7 +401,7 @@ function scoreSettlementBank(settlement: CanonicalRecord, bank: CanonicalRecord,
     score += 3;
     evidence.push(`Narration model: settlement (${Math.round(classification.confidence * 100)}%)`);
   }
-  return { left: settlement, right: bank, score: Math.max(0, Math.min(99, score)), evidence, reason: evidence.join(' · ') };
+  return { left: settlement, right: bank, score: Math.max(0, Math.min(99, score)), evidence, reason: evidence.join(' · '), autoEligible:amountSafe };
 }
 
 function buildCandidateGenerator(rights: CanonicalRecord[], options: ReconciliationOptions, domain: 'payment_to_invoice' | 'settlement_to_bank') {
@@ -310,7 +417,8 @@ function buildCandidateGenerator(rights: CanonicalRecord[], options: Reconciliat
     if (record.orderId) addIndex(byOrder, `${scopeKey(record)}|${key(record.orderId)}`, record);
     addIndex(byPayment, key(record.paymentId), record);
     addIndex(byUtr, key(record.utr), record);
-    addIndex(byAmount, `${scopeKey(record)}|${amountBucket(record.amount, options.amount_tolerance)}`, record);
+    const tolerance = toleranceToMinor(options.amount_tolerance, record.amountExponent);
+    addIndex(byAmount, `${scopeKey(record)}|${amountBucket(record.amountMinor, tolerance)}`, record);
     if (record.email) addIndex(byEmail, `${scopeKey(record)}|${key(record.email)}`, record);
     if (record.customerId) addIndex(byCustomer, `${scopeKey(record)}|${key(record.customerId)}`, record);
   });
@@ -330,7 +438,9 @@ function buildCandidateGenerator(rights: CanonicalRecord[], options: Reconciliat
       addBucket(candidates, byUtr.get(key(left.utr)), true);
       addBucket(candidates, byId.get(key(left.reference)), true);
     }
-    addBucket(candidates, byAmount.get(`${scopeKey(left)}|${amountBucket(left.amount, options.amount_tolerance)}`));
+    const tolerance = toleranceToMinor(options.amount_tolerance, left.amountExponent);
+    const bucket = amountBucket(left.amountMinor, tolerance);
+    for (const offset of [-1n, 0n, 1n]) addBucket(candidates, byAmount.get(`${scopeKey(left)}|${bucket + offset}`));
     return [...candidates];
   };
 }
@@ -341,6 +451,8 @@ function toMatch(candidate: Candidate, domain: DecisionRecord['domain']): Decisi
     source: `${candidate.left.source} ↔ ${candidate.right.source}`,
     reference: candidate.right.id,
     amount: candidate.left.amount,
+    amount_minor: candidate.left.amountMinor.toString(),
+    currency:candidate.left.currency,
     status: 'Matched',
     confidence: candidate.score,
     date: candidate.left.dateLabel,
@@ -352,9 +464,9 @@ function toMatch(candidate: Candidate, domain: DecisionRecord['domain']): Decisi
   };
 }
 
-function toException(record: CanonicalRecord, domain: DecisionRecord['domain'], status: 'Review' | 'Blocked', candidate?: Candidate): DecisionRecord {
+function toException(record: CanonicalRecord, domain: DecisionRecord['domain'], status: 'Review' | 'Blocked', candidate?: Candidate, reviewThreshold = DEFAULTS.review_threshold): DecisionRecord {
   const reason = candidate
-    ? candidate.score >= DEFAULTS.review_threshold
+    ? candidate.score >= reviewThreshold
       ? `Candidate ${candidate.right.id} is plausible but not safe to auto-match.`
       : 'No candidate passed the review threshold.'
     : 'No supported identifier, amount, or date combination produced a safe candidate.';
@@ -363,6 +475,8 @@ function toException(record: CanonicalRecord, domain: DecisionRecord['domain'], 
     source: record.source,
     reference: candidate?.right.id ?? '—',
     amount: record.amount,
+    amount_minor: record.amountMinor.toString(),
+    currency:record.currency,
     status,
     confidence: candidate?.score ?? 0,
     date: record.dateLabel,
@@ -378,13 +492,22 @@ function reconcileDomain(
   rights: CanonicalRecord[],
   domain: 'payment_to_invoice' | 'settlement_to_bank',
   options: ReconciliationOptions,
+  autoBlockedLeftIds = new Set<string>(),
 ): DomainResult {
   const candidateGenerator = buildCandidateGenerator(rights, options, domain);
   const scorer = domain === 'payment_to_invoice' ? scorePaymentInvoice : scoreSettlementBank;
   const ranked = lefts.map((left) => ({
     left,
-    candidates: candidateGenerator(left).map((right) => scorer(left, right, options)).filter((candidate) => candidate.score > 0).sort((a,b) => b.score - a.score),
-  })).sort((a,b) => (b.candidates[0]?.score ?? 0) - (a.candidates[0]?.score ?? 0));
+    candidates: candidateGenerator(left).map((right) => {
+      const candidate = scorer(left, right, options);
+      if (autoBlockedLeftIds.has(key(left.id))) {
+        candidate.autoEligible = false;
+        candidate.evidence.push('Settlement item proof did not independently close');
+      }
+      return candidate;
+    }).filter((candidate) => candidate.score > 0)
+      .sort((a,b) => b.score - a.score || a.right.id.localeCompare(b.right.id)),
+  })).sort((a,b) => (b.candidates[0]?.score ?? 0) - (a.candidates[0]?.score ?? 0) || a.left.id.localeCompare(b.left.id));
   const usedRight = new Set<string>();
   const resolvedIds = new Set<string>();
   const matches: DecisionRecord[] = [];
@@ -394,17 +517,18 @@ function reconcileDomain(
     const top = available[0];
     const runnerUp = available[1];
     const margin = top ? top.score - (runnerUp?.score ?? 0) : 0;
-    if (top && top.score >= options.auto_match_threshold && margin >= options.ambiguity_margin) {
+    if (top && top.autoEligible && top.score >= options.auto_match_threshold && margin >= options.ambiguity_margin) {
       usedRight.add(`${top.right.source}:${top.right.id}`);
       resolvedIds.add(`${top.left.source}:${top.left.id}`);
       resolvedIds.add(`${top.right.source}:${top.right.id}`);
       matches.push(toMatch(top, domain));
     } else if (top && top.score >= options.review_threshold) {
       const ambiguityEvidence = runnerUp && margin < options.ambiguity_margin ? [`Ambiguous: top two candidates are ${margin} points apart`] : [];
+      if (!top.autoEligible) ambiguityEvidence.push('Hard safety gate: amount or record state is not eligible for automatic posting');
       top.evidence.push(...ambiguityEvidence);
-      exceptions.push(toException(item.left, domain, 'Review', top));
+      exceptions.push(toException(item.left, domain, 'Review', top, options.review_threshold));
     } else {
-      exceptions.push(toException(item.left, domain, 'Blocked', top));
+      exceptions.push(toException(item.left, domain, 'Blocked', top, options.review_threshold));
     }
   }
   for (const right of rights) {
@@ -415,6 +539,110 @@ function reconcileDomain(
 
 function pairKey(left: string, right: string) {
   return [key(left), key(right)].sort().join('::');
+}
+
+interface SettlementProofBuild {
+  closures: SettlementClosure[];
+  autoBlockedSettlementIds: Set<string>;
+}
+
+function buildSettlementClosures(
+  items: RawRecord[] | undefined,
+  settlements: CanonicalRecord[],
+): SettlementProofBuild {
+  if (items === undefined) return { closures:[], autoBlockedSettlementIds:new Set() };
+  type Group = { id:string; currency:string; count:number; credit:bigint; debit:bigint; fee:bigint; tax:bigint; errors:string[] };
+  const groups = new Map<string, Group>();
+  const entityCounts = new Map<string,number>();
+  for (const raw of items) {
+    const entityId = text(pick(indexedRow(raw), ['entity_id','entityid','id']));
+    if (entityId) entityCounts.set(key(entityId), (entityCounts.get(key(entityId)) ?? 0) + 1);
+  }
+  items.forEach((raw, index) => {
+    const row = indexedRow(raw);
+    const rawSettlementId = text(pick(row, ['settlement_id','settlementid']));
+    const settlementId = rawSettlementId || `invalid_settlement_item_${index + 1}`;
+    const groupKey = key(settlementId);
+    const currency = text(pick(row, ['currency','currency_code','ccy']) ?? 'INR').toUpperCase();
+    const group = groups.get(groupKey) ?? { id:settlementId, currency, count:0, credit:0n, debit:0n, fee:0n, tax:0n, errors:[] };
+    group.count += 1;
+    if (!rawSettlementId) group.errors.push(`item ${index + 1}: missing settlement_id`);
+    if (group.currency !== currency) group.errors.push(`item ${index + 1}: mixed currencies inside one settlement`);
+    const entityId = text(pick(row, ['entity_id','entityid','id']));
+    if (!entityId) group.errors.push(`item ${index + 1}: missing entity_id`);
+    else if ((entityCounts.get(key(entityId)) ?? 0) > 1) group.errors.push(`item ${index + 1}: duplicate entity_id ${entityId}`);
+    const parseField = (aliases:string[], label:string) => {
+      const value = pick(row, aliases);
+      if (value === undefined) return 0n;
+      try {
+        const parsed = parseMoney(value, currency, true).minor;
+        if (parsed < 0n) group.errors.push(`item ${index + 1}: ${label} must be non-negative`);
+        return parsed;
+      } catch (error) {
+        group.errors.push(`item ${index + 1}: invalid ${label} (${error instanceof Error ? error.message : 'invalid value'})`);
+        return 0n;
+      }
+    };
+    const hasCredit = pick(row, ['credit']) !== undefined;
+    const hasDebit = pick(row, ['debit']) !== undefined;
+    if (!hasCredit && !hasDebit) group.errors.push(`item ${index + 1}: credit or debit is required`);
+    group.credit += parseField(['credit'], 'credit');
+    group.debit += parseField(['debit'], 'debit');
+    group.fee += parseField(['fee'], 'fee');
+    group.tax += parseField(['tax'], 'tax');
+    groups.set(groupKey, group);
+  });
+
+  const settlementById = new Map(settlements.map((settlement) => [key(settlement.id), settlement]));
+  for (const settlement of settlements) {
+    const settlementKey = key(settlement.id);
+    if (!groups.has(settlementKey)) groups.set(settlementKey, {
+      id:settlement.id,
+      currency:settlement.currency,
+      count:0,
+      credit:0n,
+      debit:0n,
+      fee:0n,
+      tax:0n,
+      errors:['No settlement reconciliation items supplied for this settlement'],
+    });
+  }
+  const autoBlockedSettlementIds = new Set<string>();
+  const closures = [...groups.values()].map((group):SettlementClosure => {
+    const settlement = settlementById.get(key(group.id));
+    if (!settlement) group.errors.push('Settlement does not exist in the settlement batch');
+    if (settlement && settlement.currency !== group.currency) group.errors.push('Settlement currency differs from item currency');
+    const expected = settlement?.amountMinor ?? 0n;
+    const net = group.credit - group.debit;
+    const delta = net - expected;
+    const status: SettlementClosure['status'] = !settlement || group.count === 0
+      ? 'Blocked'
+      : group.errors.length || delta !== 0n
+        ? 'Review'
+        : 'Verified';
+    if (settlement && status !== 'Verified') autoBlockedSettlementIds.add(key(settlement.id));
+    const evidence = [
+      `${group.count} Razorpay settlement item${group.count === 1 ? '' : 's'} grouped`,
+      `Net proof ${net} minor units versus settlement ${expected}`,
+      ...group.errors,
+    ];
+    if (!group.errors.length && delta !== 0n) evidence.push(`Net delta ${delta} fails the exact settlement proof requirement`);
+    return {
+      settlement_id:group.id,
+      status,
+      currency:group.currency,
+      item_count:group.count,
+      credit_minor:group.credit.toString(),
+      debit_minor:group.debit.toString(),
+      net_minor:net.toString(),
+      expected_minor:expected.toString(),
+      delta_minor:delta.toString(),
+      fee_minor:group.fee.toString(),
+      tax_minor:group.tax.toString(),
+      evidence,
+    };
+  }).sort((a,b) => a.settlement_id.localeCompare(b.settlement_id));
+  return { closures, autoBlockedSettlementIds };
 }
 
 function evaluate(matches: DecisionRecord[], groundTruth: ReconciliationInput['ground_truth']) {
@@ -431,16 +659,88 @@ function evaluate(matches: DecisionRecord[], groundTruth: ReconciliationInput['g
   return { precision, recall, f1, falseRate: predicted.size ? falsePositives / predicted.size : 0, truthCount: expected.size, falsePositives, falseNegatives };
 }
 
-function checksum(records: CanonicalRecord[]) {
-  let hash = 2166136261;
-  for (const record of records) {
-    const value = `${record.source}|${record.id}|${record.amount}|${record.date ?? ''}`;
-    for (let index = 0; index < value.length; index += 1) {
-      hash ^= value.charCodeAt(index);
-      hash = Math.imul(hash, 16777619);
-    }
+function checksum(records: CanonicalRecord[], validationExceptions: DecisionRecord[], closures: SettlementClosure[]) {
+  const canonicalRecords = records.map((record) => ({
+    source:record.source,
+    id:record.id,
+    amount_minor:record.amountMinor.toString(),
+    currency:record.currency,
+    date:record.date ?? null,
+    merchant_id:record.merchantId,
+  })).sort((a,b) => a.source.localeCompare(b.source) || a.id.localeCompare(b.id));
+  const rejectedRecords = validationExceptions.map((record) => ({source:record.source,id:record.id,amount_minor:record.amount_minor,currency:record.currency,evidence:record.evidence}))
+    .sort((a,b) => `${a.source}:${a.id}`.localeCompare(`${b.source}:${b.id}`));
+  const proof = closures.map((closure) => ({settlement_id:closure.settlement_id,currency:closure.currency,item_count:closure.item_count,credit_minor:closure.credit_minor,debit_minor:closure.debit_minor,fee_minor:closure.fee_minor,tax_minor:closure.tax_minor,status:closure.status}));
+  return sha256(JSON.stringify({records:canonicalRecords,rejected_records:rejectedRecords,settlement_proof:proof})).slice(0, 16);
+}
+
+function independentlyVerify(
+  checksumValue: string,
+  records: CanonicalRecord[],
+  validationExceptions: DecisionRecord[],
+  matches: DecisionRecord[],
+  exceptions: DecisionRecord[],
+  closures: SettlementClosure[],
+  options: ReconciliationOptions,
+): VerificationResult {
+  const invariants: VerificationResult['invariants'] = [];
+  const check = (code:string, passed:boolean, detail:string) => invariants.push({ code, passed, detail });
+  const bySourceAndId = new Map(records.map((record) => [`${record.source}:${key(record.id)}`, record]));
+  const used = new Set<string>();
+  let matchFactsValid = true;
+  for (const match of matches) {
+    const leftSource:RecordSource = match.domain === 'payment_to_invoice' ? 'Razorpay payment' : 'Razorpay settlement';
+    const rightSource:RecordSource = match.domain === 'payment_to_invoice' ? 'Invoice ledger' : 'Bank statement';
+    const leftKey = `${leftSource}:${key(match.id)}`;
+    const rightKey = `${rightSource}:${key(match.matched_with ?? '')}`;
+    const left = bySourceAndId.get(leftKey);
+    const right = bySourceAndId.get(rightKey);
+    const duplicate = used.has(leftKey) || used.has(rightKey);
+    used.add(leftKey);
+    used.add(rightKey);
+    const sameCurrency = Boolean(left && right && left.currency === right.currency);
+    const sameMerchant = Boolean(left && right && (!left.merchantId || !right.merchantId || key(left.merchantId) === key(right.merchantId)));
+    const amountWithinTolerance = Boolean(left && right && left.amountMinor === right.amountMinor);
+    const safeState = Boolean(left && right
+      && !(rightSource === 'Invoice ledger' && ['void','voided','cancelled','canceled'].includes(right.status))
+      && !(rightSource === 'Bank statement' && ['debit','dr','outflow'].includes(right.direction)));
+    const decisionExact = Boolean(left && match.amount_minor === left.amountMinor.toString() && match.currency === left.currency);
+    if (!left || !right || duplicate || !sameCurrency || !sameMerchant || !amountWithinTolerance || !safeState || !decisionExact) matchFactsValid = false;
   }
-  return (hash >>> 0).toString(16).padStart(8, '0');
+  check('MATCH_FACTS', matchFactsValid, `${matches.length} proposed matches independently re-read from canonical records`);
+  check('ONE_TO_ONE', used.size === matches.length * 2, `${used.size} unique endpoints for ${matches.length} pairs`);
+  const confidenceGate = matches.every((match) => match.confidence >= options.auto_match_threshold);
+  check('CONFIDENCE_GATE', confidenceGate, `Every released match meets the configured ${options.auto_match_threshold}-point threshold`);
+  const coreInputCount = records.length + validationExceptions.length;
+  const decisionsAccounted = matches.length * 2 + exceptions.length;
+  check('NO_SILENT_DROPS', decisionsAccounted === coreInputCount, `${decisionsAccounted}/${coreInputCount} core records have an explicit decision`);
+  const uniqueExceptionEndpoints = new Set(exceptions.map((item) => `${item.source}:${key(item.id)}`));
+  check('UNIQUE_DECISIONS', uniqueExceptionEndpoints.size === exceptions.length && [...uniqueExceptionEndpoints].every((endpoint) => !used.has(endpoint)), 'No endpoint is both matched and excepted, or excepted twice');
+  const closureSafety = closures.every((closure) => closure.status !== 'Verified' || BigInt(closure.delta_minor) === 0n);
+  check('SETTLEMENT_PROOF', closureSafety, `${closures.filter((item) => item.status === 'Verified').length}/${closures.length} settlement closures verified without unsafe deltas`);
+  const closureBySettlement = new Map(closures.map((closure) => [key(closure.settlement_id), closure]));
+  const releaseGate = matches.filter((match) => match.domain === 'settlement_to_bank').every((match) => {
+    if (!closures.length) return true;
+    return closureBySettlement.get(key(match.id))?.status === 'Verified';
+  });
+  check('SETTLEMENT_RELEASE_GATE', releaseGate, 'No settlement with missing or non-exact item proof was released as matched');
+  const failures = invariants.filter((invariant) => !invariant.passed).map((invariant) => `${invariant.code}: ${invariant.detail}`);
+  const receiptPayload = {
+    checksum:checksumValue,
+    ruleset:RULESET,
+    matches:matches.map((item) => ({domain:item.domain,id:item.id,matched_with:item.matched_with,amount_minor:item.amount_minor,currency:item.currency,confidence:item.confidence})).sort((a,b) => `${a.domain}:${a.id}`.localeCompare(`${b.domain}:${b.id}`)),
+    exceptions:exceptions.map((item) => ({domain:item.domain,source:item.source,id:item.id,status:item.status,reference:item.reference})).sort((a,b) => `${a.domain}:${a.source}:${a.id}`.localeCompare(`${b.domain}:${b.source}:${b.id}`)),
+    closures:closures.map((item) => ({settlement_id:item.settlement_id,status:item.status,net_minor:item.net_minor,expected_minor:item.expected_minor,delta_minor:item.delta_minor})),
+    invariants:invariants.map((item) => ({code:item.code,passed:item.passed})),
+  };
+  return {
+    status:failures.length ? 'FAIL' : 'PASS',
+    verifier_version:VERIFIER_VERSION,
+    receipt_sha256:sha256(JSON.stringify(receiptPayload)),
+    checked_matches:matches.length,
+    invariants,
+    failures,
+  };
 }
 
 function coverageFor(source: RecordSource, records: CanonicalRecord[], resolvedIds: Set<string>) {
@@ -451,50 +751,85 @@ function coverageFor(source: RecordSource, records: CanonicalRecord[], resolvedI
 
 export function reconcile(input: ReconciliationInput): ReconciliationResult {
   const started = performance.now();
+  const optionKeys = new Set(['auto_match_threshold','review_threshold','ambiguity_margin','amount_tolerance','date_window_days','max_candidate_bucket']);
+  const unknownOptions = Object.keys(input.options ?? {}).filter((option) => !optionKeys.has(option));
+  if (unknownOptions.length) throw new ReconciliationInputError(`Unknown reconciliation options: ${unknownOptions.join(', ')}`);
   const options: ReconciliationOptions = { ...DEFAULTS, ...input.options };
+  if (!Number.isFinite(options.auto_match_threshold) || options.auto_match_threshold < DEFAULTS.auto_match_threshold || options.auto_match_threshold > 99) throw new ReconciliationInputError(`auto_match_threshold cannot be weaker than ${DEFAULTS.auto_match_threshold} and must not exceed 99`);
+  if (!Number.isFinite(options.review_threshold) || options.review_threshold < 0 || options.review_threshold > options.auto_match_threshold) throw new ReconciliationInputError('review_threshold must be between 0 and auto_match_threshold');
+  if (!Number.isFinite(options.ambiguity_margin) || options.ambiguity_margin < DEFAULTS.ambiguity_margin || options.ambiguity_margin > 99) throw new ReconciliationInputError(`ambiguity_margin cannot be weaker than ${DEFAULTS.ambiguity_margin} and must not exceed 99`);
+  if (!Number.isFinite(options.amount_tolerance) || options.amount_tolerance < 0 || options.amount_tolerance > 1_000_000) throw new ReconciliationInputError('amount_tolerance must be a finite non-negative amount');
+  if (!Number.isFinite(options.date_window_days) || options.date_window_days < 0 || options.date_window_days > 365) throw new ReconciliationInputError('date_window_days must be between 0 and 365');
+  if (!Number.isInteger(options.max_candidate_bucket) || options.max_candidate_bucket < 1 || options.max_candidate_bucket > 10_000) throw new ReconciliationInputError('max_candidate_bucket must be an integer between 1 and 10000');
   const paymentResult = normalizeRows(input.payments ?? [], 'Razorpay payment');
   const settlementResult = normalizeRows(input.settlements ?? [], 'Razorpay settlement');
   const bankResult = normalizeRows(input.bank_transactions ?? [], 'Bank statement');
   const invoiceResult = normalizeRows(input.invoices ?? [], 'Invoice ledger');
   const allRecords = [...paymentResult.records, ...settlementResult.records, ...bankResult.records, ...invoiceResult.records];
+  for (const exponent of new Set(allRecords.map((record) => record.amountExponent))) {
+    try { toleranceToMinor(options.amount_tolerance, exponent); }
+    catch { throw new ReconciliationInputError(`amount_tolerance has too much precision for a currency in this batch`); }
+  }
   const validationExceptions = [...paymentResult.exceptions, ...settlementResult.exceptions, ...bankResult.exceptions, ...invoiceResult.exceptions];
+  const settlementProof = buildSettlementClosures(input.settlement_recon_items, settlementResult.records);
   const paymentDomain = reconcileDomain(paymentResult.records, invoiceResult.records, 'payment_to_invoice', options);
-  const settlementDomain = reconcileDomain(settlementResult.records, bankResult.records, 'settlement_to_bank', options);
+  const settlementDomain = reconcileDomain(settlementResult.records, bankResult.records, 'settlement_to_bank', options, settlementProof.autoBlockedSettlementIds);
   const matches = [...paymentDomain.matches, ...settlementDomain.matches];
   const exceptions = [...validationExceptions, ...paymentDomain.exceptions, ...settlementDomain.exceptions];
   const resolvedIds = new Set([...paymentDomain.resolvedIds, ...settlementDomain.resolvedIds]);
   const evaluation = evaluate(matches, input.ground_truth);
   const classifierEvaluation = evaluateNarrationClassifier();
-  const inputRecords = (input.payments?.length ?? 0) + (input.settlements?.length ?? 0) + (input.bank_transactions?.length ?? 0) + (input.invoices?.length ?? 0);
+  const proofItemCount = input.settlement_recon_items?.length ?? 0;
+  const coreInputRecords = (input.payments?.length ?? 0) + (input.settlements?.length ?? 0) + (input.bank_transactions?.length ?? 0) + (input.invoices?.length ?? 0);
+  const processedRecords = coreInputRecords + proofItemCount;
   const duration = Math.max(performance.now() - started, 0.01);
   const matchedRecords = matches.length * 2;
   const reviewRecords = exceptions.filter((record) => record.status === 'Review').length;
   const blockedRecords = exceptions.filter((record) => record.status === 'Blocked').length;
   const generatedAt = new Date().toISOString();
-  const batchChecksum = checksum(allRecords);
+  const batchChecksum = checksum(allRecords, validationExceptions, settlementProof.closures);
+  const valueByCurrencyMap = new Map<string,{minor:bigint;exponent:number}>();
+  for (const match of matches) {
+    const current = valueByCurrencyMap.get(match.currency) ?? {minor:0n,exponent:currencyExponent(match.currency)};
+    current.minor += BigInt(match.amount_minor);
+    valueByCurrencyMap.set(match.currency, current);
+  }
+  const valueByCurrency = [...valueByCurrencyMap.entries()].sort(([a],[b]) => a.localeCompare(b)).map(([currency,value]) => ({
+    currency,
+    minor:value.minor.toString(),
+    decimal:minorToDecimal(value.minor, value.exponent),
+  }));
+  const singleCurrencyValue = valueByCurrency.length === 1 ? valueByCurrency[0] : null;
+  const verification = independentlyVerify(batchChecksum, allRecords, validationExceptions, matches, exceptions, settlementProof.closures, options);
+  if (verification.status !== 'PASS') throw new Error(`Independent verification failed: ${verification.failures.join('; ')}`);
   const metrics: ReconciliationMetrics = {
-    input_records: inputRecords,
+    input_records: coreInputRecords,
+    processed_records:processedRecords,
     normalized_records: allRecords.length,
+    settlement_recon_items:proofItemCount,
     matched_pairs: matches.length,
     matched_records: matchedRecords,
     review_records: reviewRecords,
     blocked_records: blockedRecords,
     exception_records: exceptions.length,
     match_rate: allRecords.length ? matchedRecords / allRecords.length : 0,
-    value_reconciled: matches.reduce((sum, record) => sum + record.amount, 0),
+    value_reconciled: singleCurrencyValue ? Number(singleCurrencyValue.decimal) : null,
+    value_reconciled_minor:singleCurrencyValue?.minor ?? '',
+    value_reconciled_decimal:singleCurrencyValue?.decimal ?? '',
+    value_reconciled_by_currency:valueByCurrency,
     duration_ms: duration,
-    throughput_records_per_second: inputRecords / (duration / 1000),
+    throughput_records_per_second: processedRecords / (duration / 1000),
     precision: evaluation.precision,
     recall: evaluation.recall,
     f1: evaluation.f1,
     false_auto_match_rate: evaluation.falseRate,
     ground_truth_pairs: evaluation.truthCount,
-    silent_drops: inputRecords - allRecords.length - validationExceptions.length,
+    silent_drops: coreInputRecords - allRecords.length - validationExceptions.length,
     narration_classifier_accuracy: classifierEvaluation.accuracy,
   };
   const now = new Date(generatedAt).toLocaleTimeString('en-GB',{hour12:false,timeZone:'Asia/Kolkata'});
   return {
-    run_id: `CP-${batchChecksum}-${Date.now().toString(36)}`,
+    run_id: `CP-${batchChecksum}`,
     engine_version: ENGINE_VERSION,
     ruleset: RULESET,
     generated_at: generatedAt,
@@ -503,7 +838,7 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
     matches,
     exceptions,
     audit: [
-      { time:now, title:'Run completed', copy:`${inputRecords.toLocaleString('en-IN')} records processed in ${duration.toFixed(2)} ms; ${matches.length} pairs verified.`, tone:'done' },
+      { time:now, title:'Run completed', copy:`${processedRecords.toLocaleString('en-IN')} primary and evidence records processed in ${duration.toFixed(2)} ms; ${matches.length} pairs verified.`, tone:'done' },
       { time:now, title:'Safety gates applied', copy:`${reviewRecords} records require review and ${blockedRecords} remain blocked. No low-confidence write was executed.`, tone:exceptions.length ? 'warn' : 'done' },
       { time:now, title:'Narration model evaluated', copy:`Local classifier scored ${(classifierEvaluation.accuracy * 100).toFixed(1)}% on its isolated holdout set.`, tone:'ai' },
       { time:now, title:'Cross-source indexes built', copy:'Candidate generation used identifier and bounded amount indexes; no Cartesian product scan was performed.', tone:'done' },
@@ -514,7 +849,29 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
       coverageFor('Razorpay settlement', allRecords, resolvedIds),
       coverageFor('Bank statement', allRecords, resolvedIds),
       coverageFor('Invoice ledger', allRecords, resolvedIds),
+      {
+        source:'Razorpay settlement recon',
+        total:proofItemCount,
+        resolved:settlementProof.closures.filter((closure) => closure.status === 'Verified').reduce((sum, closure) => sum + closure.item_count, 0),
+        rate:proofItemCount ? settlementProof.closures.filter((closure) => closure.status === 'Verified').reduce((sum, closure) => sum + closure.item_count, 0) / proofItemCount : 0,
+      },
     ],
+    settlement_closures:settlementProof.closures,
+    verification,
+    agent_execution:{
+      model:'bounded_autonomous_state_machine',
+      mode:'read_only',
+      status:'COMPLETED',
+      release_policy:'verify_before_release',
+      stages:[
+        {stage:'INGEST',status:'PASS',records_in:processedRecords,records_out:processedRecords,detail:'Accepted bounded JSON records without mutating any source system.'},
+        {stage:'NORMALIZE',status:'PASS',records_in:coreInputRecords,records_out:allRecords.length,detail:`Canonicalized exact-money facts and surfaced ${validationExceptions.length} schema exceptions.`},
+        {stage:'PROPOSE',status:'PASS',records_in:allRecords.length,records_out:matches.length + exceptions.length,detail:'Generated candidates through bounded indexes and hard financial safety gates.'},
+        {stage:'PROVE_SETTLEMENTS',status:'PASS',records_in:proofItemCount,records_out:settlementProof.closures.length,detail:'Aggregated Razorpay credits and debits; only exact net closures were verified.'},
+        {stage:'VERIFY',status:'PASS',records_in:matches.length,records_out:matches.length,detail:`Independent verifier passed ${verification.invariants.length} invariants; receipt ${verification.receipt_sha256}.`},
+        {stage:'RELEASE',status:'PASS',records_in:matches.length + exceptions.length,records_out:matches.length + exceptions.length,detail:'Released measured matches and an honest exception queue; performed no financial writes.'},
+      ],
+    },
   };
 }
 
