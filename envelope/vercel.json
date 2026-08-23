@@ -2,6 +2,10 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     {
+      "source": "/",
+      "destination": "https://closepilot.gshbholanath19.chatgpt.site/"
+    },
+    {
       "source": "/:path*",
       "destination": "https://closepilot.gshbholanath19.chatgpt.site/:path*"
     }
