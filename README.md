@@ -2,6 +2,13 @@
 
 ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments, settlement recon items, settlements, bank transactions and invoice ledgers. It turns exported CSV/JSON into explainable matches, aggregate cash-closure proofs, an honest exception queue and reproducible verification receipts.
 
+## Live evaluator deployment
+
+- App: https://closepilot.gshbholanath19.chatgpt.site
+- Evaluation API: https://closepilot.gshbholanath19.chatgpt.site/api/v1/reconcile
+- OpenAPI 3.1: https://closepilot.gshbholanath19.chatgpt.site/openapi.json
+- Health check: https://closepilot.gshbholanath19.chatgpt.site/api/health
+
 ## What is real
 
 - The UI calls the same versioned `POST /api/v1/reconcile` endpoint available to evaluators.
@@ -37,7 +44,7 @@ Performance is hardware-dependent. These figures describe the committed syntheti
 ## Public evaluation API
 
 ```bash
-curl -X POST https://YOUR_DEPLOYMENT/api/v1/reconcile \
+curl -X POST https://closepilot.gshbholanath19.chatgpt.site/api/v1/reconcile \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: evaluator-run-001" \
   -d @examples/request.json
