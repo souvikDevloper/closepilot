@@ -154,11 +154,42 @@
           "failures": { "type": "array", "maxItems": 0, "items": { "type": "string" } }
         }
       },
+      "ReconciliationMetrics": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["input_records", "processed_records", "normalized_records", "settlement_recon_items", "matched_pairs", "matched_records", "review_records", "blocked_records", "exception_records", "input_resolution_rate", "match_rate", "duration_ms", "throughput_records_per_second", "precision", "recall", "f1", "false_auto_match_rate", "ground_truth_pairs", "silent_drops"],
+        "properties": {
+          "input_records": { "type": "integer", "minimum": 0, "description": "All submitted primary payment, invoice, settlement and bank records, including validation rejects." },
+          "processed_records": { "type": "integer", "minimum": 0, "description": "Primary records plus settlement recon evidence rows." },
+          "normalized_records": { "type": "integer", "minimum": 0, "description": "Primary records that passed schema and exact-money normalization." },
+          "settlement_recon_items": { "type": "integer", "minimum": 0 },
+          "matched_pairs": { "type": "integer", "minimum": 0 },
+          "matched_records": { "type": "integer", "minimum": 0 },
+          "review_records": { "type": "integer", "minimum": 0 },
+          "blocked_records": { "type": "integer", "minimum": 0 },
+          "exception_records": { "type": "integer", "minimum": 0 },
+          "input_resolution_rate": { "type": "number", "minimum": 0, "maximum": 1, "description": "Matched endpoints divided by all submitted primary records, including validation rejects." },
+          "match_rate": { "type": "number", "minimum": 0, "maximum": 1, "description": "Matched endpoints divided by successfully normalized primary records." },
+          "value_reconciled": { "type": ["number", "null"], "description": "Major-unit total when the run contains exactly one currency; null for multi-currency or empty runs." },
+          "value_reconciled_minor": { "type": "string" },
+          "value_reconciled_decimal": { "type": "string" },
+          "value_reconciled_by_currency": { "type": "array", "items": { "type": "object", "required": ["currency", "minor", "decimal"], "properties": { "currency": { "type": "string" }, "minor": { "type": "string" }, "decimal": { "type": "string" } } } },
+          "duration_ms": { "type": ["number", "null"], "minimum": 0, "description": "Measured engine time, or null when the host clock is too coarse for a trustworthy measurement." },
+          "throughput_records_per_second": { "type": ["number", "null"], "minimum": 0, "description": "Derived only from a trustworthy duration; otherwise null." },
+          "precision": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Null when ground truth is not supplied." },
+          "recall": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Null when ground truth is not supplied." },
+          "f1": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Null when ground truth is not supplied." },
+          "false_auto_match_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Null when ground truth is not supplied." },
+          "ground_truth_pairs": { "type": "integer", "minimum": 0 },
+          "silent_drops": { "type": "integer", "minimum": 0 },
+          "narration_classifier_accuracy": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      },
       "ReconciliationResult": {
         "type": "object", "required": ["run_id", "engine_version", "ruleset", "generated_at", "checksum", "metrics", "matches", "exceptions", "settlement_closures", "verification", "agent_execution"],
         "properties": {
           "run_id": { "type": "string" }, "engine_version": { "type": "string" }, "ruleset": { "type": "string" }, "generated_at": { "type": "string", "format": "date-time" }, "checksum": { "type": "string" },
-          "metrics": { "type": "object", "additionalProperties": true }, "matches": { "type": "array", "items": { "$ref": "#/components/schemas/Decision" } }, "exceptions": { "type": "array", "items": { "$ref": "#/components/schemas/Decision" } },
+          "metrics": { "$ref": "#/components/schemas/ReconciliationMetrics" }, "matches": { "type": "array", "items": { "$ref": "#/components/schemas/Decision" } }, "exceptions": { "type": "array", "items": { "$ref": "#/components/schemas/Decision" } },
           "settlement_closures": { "type": "array", "items": { "$ref": "#/components/schemas/SettlementClosure" } }, "verification": { "$ref": "#/components/schemas/Verification" }, "agent_execution": { "type": "object", "additionalProperties": true },
           "audit": { "type": "array", "items": { "type": "object" } }, "source_coverage": { "type": "array", "items": { "type": "object" } }
         }

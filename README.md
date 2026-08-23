@@ -37,7 +37,7 @@ Latest local run with 100,000 primary records plus 32,500 settlement evidence ro
 - 100% precision and recall on the generated labelled holdout
 - 0 false automatic matches
 - 0 silent drops
-- ~9,100 primary + evidence records/second
+- ~12,400 primary + evidence records/second
 
 Performance is hardware-dependent. These figures describe the committed synthetic benchmark, not an unsupported claim about all external data.
 
@@ -76,6 +76,8 @@ The hosted API accepts up to 100,000 records in `summary` mode. Full decision re
 ```
 
 Ground truth is optional. When supplied, the response calculates precision, recall, F1 and false-auto-match rate. Without it, those metrics are returned as `null` instead of being invented.
+
+The response exposes two deliberately different coverage denominators: `input_resolution_rate` is matched endpoints divided by every submitted primary record (including validation rejects), while the backward-compatible `match_rate` is matched endpoints divided by successfully normalized records. Runtime and throughput are `null` when the host's monotonic clock is too coarse to support an honest measurement.
 
 `settlement_recon_items` accepts Razorpay settlement recon rows. `credit`, `debit`, `fee` and `tax` are integer currency subunits. Fees and tax are evidence fields; the authoritative settlement net is `sum(credit - debit)`, so they are not subtracted twice.
 

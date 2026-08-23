@@ -14,6 +14,7 @@ test('1,000-record holdout produces perfect pair quality and honest exceptions',
   assert.equal(result.metrics.matched_pairs, 480);
   assert.equal(result.metrics.matched_records, 960);
   assert.equal(result.metrics.exception_records, 40);
+  assert.equal(result.metrics.input_resolution_rate, 0.96);
   assert.equal(result.metrics.match_rate, 0.96);
   assert.equal(result.metrics.precision, 1);
   assert.equal(result.metrics.recall, 1);
@@ -195,9 +196,20 @@ test('duplicate source identifiers block every duplicate occurrence', () => {
     invoices:[{id:'inv_duplicate',payment_id:'pay_duplicate',amount:100}],
   });
   assert.equal(result.matches.length, 0);
+  assert.equal(result.metrics.input_resolution_rate, 0);
   assert.equal(result.metrics.silent_drops, 0);
   assert.equal(result.exceptions.filter((item) => item.id.startsWith('pay_duplicate#duplicate_')).length, 2);
   assert.equal(result.verification.status, 'PASS');
+});
+
+test('missing optional settlement proof is reported as not evaluated', () => {
+  const result = reconcile({
+    settlements:[{id:'setl_optional',utr:'UTR-OPTIONAL',amount:'25.00'}],
+    bank_transactions:[{id:'bank_optional',utr:'UTR-OPTIONAL',credit:'25.00'}],
+  });
+  assert.equal(result.matches.length, 1);
+  assert.match(result.verification.invariants.find((item) => item.code === 'SETTLEMENT_PROOF')?.detail ?? '', /not evaluated/i);
+  assert.match(result.agent_execution.stages.find((item) => item.stage === 'PROVE_SETTLEMENTS')?.detail ?? '', /not evaluated/i);
 });
 
 test('verification receipt is order-independent but changes when financial facts change', () => {

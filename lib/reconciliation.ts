@@ -59,13 +59,16 @@ export interface ReconciliationMetrics {
   review_records: number;
   blocked_records: number;
   exception_records: number;
+  /** Resolved endpoints divided by every submitted primary record, including validation rejects. */
+  input_resolution_rate: number;
+  /** Resolved endpoints divided by records that normalized successfully. */
   match_rate: number;
   value_reconciled: number | null;
   value_reconciled_minor: string;
   value_reconciled_decimal: string;
   value_reconciled_by_currency: Array<{ currency:string; minor:string; decimal:string }>;
-  duration_ms: number;
-  throughput_records_per_second: number;
+  duration_ms: number | null;
+  throughput_records_per_second: number | null;
   precision: number | null;
   recall: number | null;
   f1: number | null;
@@ -717,13 +720,22 @@ function independentlyVerify(
   const uniqueExceptionEndpoints = new Set(exceptions.map((item) => `${item.source}:${key(item.id)}`));
   check('UNIQUE_DECISIONS', uniqueExceptionEndpoints.size === exceptions.length && [...uniqueExceptionEndpoints].every((endpoint) => !used.has(endpoint)), 'No endpoint is both matched and excepted, or excepted twice');
   const closureSafety = closures.every((closure) => closure.status !== 'Verified' || BigInt(closure.delta_minor) === 0n);
-  check('SETTLEMENT_PROOF', closureSafety, `${closures.filter((item) => item.status === 'Verified').length}/${closures.length} settlement closures verified without unsafe deltas`);
+  const proofDetail = closures.length
+    ? `${closures.filter((item) => item.status === 'Verified').length}/${closures.length} settlement closures verified without unsafe deltas`
+    : 'No settlement recon evidence supplied; aggregate settlement proof was not evaluated.';
+  check('SETTLEMENT_PROOF', closureSafety, proofDetail);
   const closureBySettlement = new Map(closures.map((closure) => [key(closure.settlement_id), closure]));
   const releaseGate = matches.filter((match) => match.domain === 'settlement_to_bank').every((match) => {
     if (!closures.length) return true;
     return closureBySettlement.get(key(match.id))?.status === 'Verified';
   });
-  check('SETTLEMENT_RELEASE_GATE', releaseGate, 'No settlement with missing or non-exact item proof was released as matched');
+  check(
+    'SETTLEMENT_RELEASE_GATE',
+    releaseGate,
+    closures.length
+      ? 'No settlement with missing or non-exact item proof was released as matched'
+      : 'Settlement recon evidence is optional; when supplied, only exact aggregate closures may release.',
+  );
   const failures = invariants.filter((invariant) => !invariant.passed).map((invariant) => `${invariant.code}: ${invariant.detail}`);
   const receiptPayload = {
     checksum:checksumValue,
@@ -782,7 +794,10 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
   const proofItemCount = input.settlement_recon_items?.length ?? 0;
   const coreInputRecords = (input.payments?.length ?? 0) + (input.settlements?.length ?? 0) + (input.bank_transactions?.length ?? 0) + (input.invoices?.length ?? 0);
   const processedRecords = coreInputRecords + proofItemCount;
-  const duration = Math.max(performance.now() - started, 0.01);
+  const measuredDuration = performance.now() - started;
+  // Some edge runtimes freeze or coarsen the monotonic clock during a request. In that
+  // environment, publishing an enormous derived throughput would be false precision.
+  const duration = measuredDuration >= 1 ? measuredDuration : null;
   const matchedRecords = matches.length * 2;
   const reviewRecords = exceptions.filter((record) => record.status === 'Review').length;
   const blockedRecords = exceptions.filter((record) => record.status === 'Blocked').length;
@@ -812,13 +827,14 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
     review_records: reviewRecords,
     blocked_records: blockedRecords,
     exception_records: exceptions.length,
+    input_resolution_rate: coreInputRecords ? matchedRecords / coreInputRecords : 0,
     match_rate: allRecords.length ? matchedRecords / allRecords.length : 0,
     value_reconciled: singleCurrencyValue ? Number(singleCurrencyValue.decimal) : null,
     value_reconciled_minor:singleCurrencyValue?.minor ?? '',
     value_reconciled_decimal:singleCurrencyValue?.decimal ?? '',
     value_reconciled_by_currency:valueByCurrency,
     duration_ms: duration,
-    throughput_records_per_second: processedRecords / (duration / 1000),
+    throughput_records_per_second: duration === null ? null : processedRecords / (duration / 1000),
     precision: evaluation.precision,
     recall: evaluation.recall,
     f1: evaluation.f1,
@@ -838,7 +854,9 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
     matches,
     exceptions,
     audit: [
-      { time:now, title:'Run completed', copy:`${processedRecords.toLocaleString('en-IN')} primary and evidence records processed in ${duration.toFixed(2)} ms; ${matches.length} pairs verified.`, tone:'done' },
+      { time:now, title:'Run completed', copy:duration === null
+        ? `${processedRecords.toLocaleString('en-IN')} primary and evidence records processed; the hosted clock was too coarse for a trustworthy runtime measurement. ${matches.length} pairs verified.`
+        : `${processedRecords.toLocaleString('en-IN')} primary and evidence records processed in ${duration.toFixed(2)} ms; ${matches.length} pairs verified.`, tone:'done' },
       { time:now, title:'Safety gates applied', copy:`${reviewRecords} records require review and ${blockedRecords} remain blocked. No low-confidence write was executed.`, tone:exceptions.length ? 'warn' : 'done' },
       { time:now, title:'Narration model evaluated', copy:`Local classifier scored ${(classifierEvaluation.accuracy * 100).toFixed(1)}% on its isolated holdout set.`, tone:'ai' },
       { time:now, title:'Cross-source indexes built', copy:'Candidate generation used identifier and bounded amount indexes; no Cartesian product scan was performed.', tone:'done' },
@@ -867,7 +885,9 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
         {stage:'INGEST',status:'PASS',records_in:processedRecords,records_out:processedRecords,detail:'Accepted bounded JSON records without mutating any source system.'},
         {stage:'NORMALIZE',status:'PASS',records_in:coreInputRecords,records_out:allRecords.length,detail:`Canonicalized exact-money facts and surfaced ${validationExceptions.length} schema exceptions.`},
         {stage:'PROPOSE',status:'PASS',records_in:allRecords.length,records_out:matches.length + exceptions.length,detail:'Generated candidates through bounded indexes and hard financial safety gates.'},
-        {stage:'PROVE_SETTLEMENTS',status:'PASS',records_in:proofItemCount,records_out:settlementProof.closures.length,detail:'Aggregated Razorpay credits and debits; only exact net closures were verified.'},
+        {stage:'PROVE_SETTLEMENTS',status:'PASS',records_in:proofItemCount,records_out:settlementProof.closures.length,detail:proofItemCount
+          ? 'Aggregated Razorpay credits and debits; only exact net closures were verified.'
+          : 'No settlement recon evidence was supplied; aggregate settlement proof was not evaluated.'},
         {stage:'VERIFY',status:'PASS',records_in:matches.length,records_out:matches.length,detail:`Independent verifier passed ${verification.invariants.length} invariants; receipt ${verification.receipt_sha256}.`},
         {stage:'RELEASE',status:'PASS',records_in:matches.length + exceptions.length,records_out:matches.length + exceptions.length,detail:'Released measured matches and an honest exception queue; performed no financial writes.'},
       ],
