@@ -1,0 +1,26 @@
+{
+  "payments": [
+    {
+      "id": "pay_001",
+      "invoice_id": "inv_001",
+      "amount": 12500,
+      "currency": "INR",
+      "merchant_id": "merchant_demo",
+      "created_at": "2026-08-21T10:00:00Z"
+    }
+  ],
+  "invoices": [
+    {
+      "id": "inv_001",
+      "payment_id": "pay_001",
+      "total": 12500,
+      "currency": "INR",
+      "merchant_id": "merchant_demo",
+      "date": "2026-08-21T10:01:00Z",
+      "status": "open"
+    }
+  ],
+  "ground_truth": [
+    { "left_id": "pay_001", "right_id": "inv_001" }
+  ]
+}

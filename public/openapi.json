@@ -1,0 +1,44 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ClosePilot Reconciliation API",
+    "version": "2.0.0",
+    "description": "Explainable, fail-closed reconciliation for Razorpay payments, settlements, invoices and bank transactions."
+  },
+  "paths": {
+    "/api/reconcile": {
+      "get": { "summary": "Read API usage and limits", "responses": { "200": { "description": "API documentation" } } },
+      "post": {
+        "summary": "Run a reconciliation batch",
+        "parameters": [{ "name": "Idempotency-Key", "in": "header", "required": false, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "payments": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                  "invoices": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                  "settlements": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                  "bank_transactions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                  "ground_truth": { "type": "array", "items": { "type": "object", "required": ["left_id", "right_id"], "properties": { "left_id": { "type": "string" }, "right_id": { "type": "string" } } } },
+                  "response_mode": { "type": "string", "enum": ["full", "summary"] },
+                  "benchmark": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Measured matches, exceptions, source coverage, audit trail and evaluation metrics" },
+          "400": { "description": "Invalid input" },
+          "413": { "description": "Batch or response exceeds endpoint limit" }
+        }
+      }
+    },
+    "/api/health": { "get": { "summary": "Health check", "responses": { "200": { "description": "Service is healthy" } } } }
+    ,
+    "/api/benchmark": { "get": { "summary": "Download the labelled 1,000-record holdout dataset", "responses": { "200": { "description": "Benchmark dataset with ground truth" } } } }
+  }
+}
