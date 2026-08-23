@@ -42,4 +42,4 @@ The separately generated Nova pack also passed:
 - silent drops: 0
 - duplicate identifiers, ambiguity, malformed amounts and multi-currency accounting remained fail-closed
 
-The source is published at https://github.com/souvikDevloper/closepilot and the public evaluator deployment is available at https://closepilot.gshbholanath19.chatgpt.site.
+The source is published at https://github.com/souvikDevloper/closepilot and the public evaluator deployment is available at https://closepilot-finance.vercel.app.

@@ -4,10 +4,10 @@ ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments,
 
 ## Live evaluator deployment
 
-- App: https://closepilot.gshbholanath19.chatgpt.site
-- Evaluation API: https://closepilot.gshbholanath19.chatgpt.site/api/v1/reconcile
-- OpenAPI 3.1: https://closepilot.gshbholanath19.chatgpt.site/openapi.json
-- Health check: https://closepilot.gshbholanath19.chatgpt.site/api/health
+- App: https://closepilot-finance.vercel.app
+- Evaluation API: https://closepilot-finance.vercel.app/api/v1/reconcile
+- OpenAPI 3.1: https://closepilot-finance.vercel.app/openapi.json
+- Health check: https://closepilot-finance.vercel.app/api/health
 
 ## What is real
 
@@ -44,7 +44,7 @@ Performance is hardware-dependent. These figures describe the committed syntheti
 ## Public evaluation API
 
 ```bash
-curl -X POST https://closepilot.gshbholanath19.chatgpt.site/api/v1/reconcile \
+curl -X POST https://closepilot-finance.vercel.app/api/v1/reconcile \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: evaluator-run-001" \
   -d @examples/request.json
