@@ -36,12 +36,14 @@ test('void invoices and malformed records fail closed without silent drops', () 
     payments:[
       {id:'pay_void',invoice_id:'inv_void',amount:7000,created_at:'2026-08-21T10:00:00Z'},
       {id:'pay_bad',amount:'not-an-amount'},
+      {id:'pay_bad_letters_only',amount:'NOT_A_NUMBER'},
     ],
     invoices:[{id:'inv_void',payment_id:'pay_void',amount:7000,date:'2026-08-21T10:00:00Z',status:'void'}],
   });
   assert.equal(result.matches.length, 0);
   assert.equal(result.metrics.silent_drops, 0);
   assert.ok(result.exceptions.some((item) => item.id === 'pay_bad' && item.domain === 'validation'));
+  assert.ok(result.exceptions.some((item) => item.id === 'pay_bad_letters_only' && item.domain === 'validation'));
 });
 
 test('common exported column aliases normalize correctly', () => {

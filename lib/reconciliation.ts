@@ -138,7 +138,9 @@ function pick(row: Map<string, unknown>, aliases: string[]) {
 
 function parseAmount(value: unknown, isPaise = false) {
   if (value === undefined || value === null || value === '') return Number.NaN;
-  const parsed = typeof value === 'number' ? value : Number(String(value).replace(/[^0-9.-]/g, ''));
+  const normalized = typeof value === 'number' ? value : String(value).replace(/[^0-9.-]/g, '');
+  if (typeof normalized === 'string' && !/[0-9]/.test(normalized)) return Number.NaN;
+  const parsed = typeof normalized === 'number' ? normalized : Number(normalized);
   if (!Number.isFinite(parsed)) return Number.NaN;
   return Math.abs(isPaise ? parsed / 100 : parsed);
 }
