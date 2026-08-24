@@ -1,77 +1,83 @@
-# ClosePilot — five-minute pitch
+# ClosePilot — final five-minute pitch
 
-Use the public app at `https://closepilot-finance.vercel.app`. Keep the camera bubble small, zoom the browser to show the full dashboard, and keep a terminal ready in the repository.
+Record with the public app at `https://closepilot-finance.vercel.app`. Keep the camera bubble small and a terminal open in the repository. Text in square brackets is an on-screen action, not spoken narration.
 
-## 0:00–0:35 — Problem and promise
+## 0:00–0:30 — Problem and promise
+
+[Show the Overview headline.]
 
 Hi, I’m Souvik, and this is ClosePilot for Track 04, AI Finance Controller.
 
-Finance teams still reconcile Razorpay payments, invoices, settlements and bank credits across separate exports. The dangerous part is not finding one obvious match. It is closing a complete batch without silently forcing uncertain records.
+Finance teams close payments, invoices, settlements and bank credits across disconnected exports. The hard problem is closing the complete batch without silently forcing uncertain records.
 
-ClosePilot is a bounded reconciliation agent that follows one rule: models interpret, deterministic rules authorize, and uncertainty fails closed.
+ClosePilot is a bounded reconciliation agent built around one rule: models interpret, deterministic rules authorize, and uncertainty fails closed.
 
-## 0:35–1:15 — State the measured result
+## 0:30–1:05 — Measured result
 
-[Show Overview. Point to the headline, exceptions and throughput cards.]
+[Point to safe match rate, accuracy, exceptions and throughput.]
 
-This labelled holdout contains 1,000 primary records. ClosePilot safely resolves 960, or 96 percent, and exposes the remaining 40 as honest exceptions: 10 for human review and 30 blocked.
+This labelled holdout has 1,000 primary records. ClosePilot safely resolves 960, or 96 percent, and returns the remaining 40 as honest exceptions: 10 for review and 30 blocked.
 
-The 480 pair count is not another denominator. Each pair resolves two records, so 480 pairs equal 960 matched endpoints. The additional 325 settlement rows are proof evidence and never inflate match rate.
+The 480 pair decisions resolve two endpoints each, so they account for those 960 records. The other 325 rows are settlement-proof evidence and never inflate the denominator.
 
-On this holdout, measured precision and recall are both 100 percent, false automatic matches are zero, and silent drops are zero. The documented 132,500-row stress run processed about 12,421 primary-plus-evidence records per second on the development machine.
+On this synthetic holdout, precision and recall are 100 percent, with zero false automatic matches and zero silent drops. A separate 132,500-row development-machine run processed about 12,400 rows per second.
 
-## 1:15–2:05 — Live demo
+## 1:05–2:00 — Run the real engine and inspect a messy row
 
-[Open Data lab and click Run benchmark.]
+[Open Data lab and click **Run benchmark**.]
 
-This is not a static dashboard. The button calls the same public `POST /api/v1/reconcile` endpoint that judges can call or test with their own CSV and JSON files.
+This button calls the same public, versioned API available to judges. They can upload CSV or JSON, omit ground truth for a blind run, or provide labels for measured accuracy.
 
-[Open Decisions, then an evidence drawer.]
+[Open Decisions. Select a settlement-to-bank match whose bank narration resembles “RZP merchant settlement ... credited”. Open its evidence.]
 
-Every released pair contains its exact amount in minor units, confidence, evidence and next action.
+The local Naive Bayes classifier tokenizes this messy narration and may label it as a settlement, but that adds at most three evidence points. It cannot release the match.
 
-[Open Exceptions.]
+The deterministic engine requires authoritative evidence: exact UTR gives 70 points, exact net amount gives 25, and the date window gives up to 10. Release needs 85 points, exact money, and a 10-point lead over the runner-up.
 
-Ambiguous candidates go to review. Missing identifiers, malformed amounts, duplicates and unsupported candidates remain blocked. The API never moves money or mutates source systems.
+If the same narration belongs to a debit, another currency or merchant, an ambiguous candidate, or non-exact money, it is rejected or reviewed. The model cannot overrule that boundary.
 
-## 2:05–3:05 — Architecture
+## 2:00–2:50 — Architecture and safety
 
-[Open Architecture. Move left to right across the flow.]
+[Open Architecture and move left to right across the flow.]
 
-The execution is a bounded autonomous state machine. First, schema guards normalize common Razorpay, bank and ledger aliases into an exact canonical ledger using integer minor units.
+Schema guards normalize Razorpay, bank and ledger aliases into a canonical ledger. Money uses integer minor units, so floating point never authorizes a decision.
 
-Second, hash indexes generate bounded candidates by identifiers, UTR, order, customer and amount. There is no Cartesian product scan.
+Bounded indexes generate candidates by ID, UTR, order, customer and amount, without an all-to-all scan.
 
-A local narration classifier interprets messy bank text, but its output is evidence only. Currency, merchant, direction, exact value, collisions, confidence and ambiguity remain deterministic authority.
+The engine proves that aggregate settlement credits minus debits equal the declared total. A one-subunit difference blocks release.
 
-For settlement evidence, ClosePilot proves that aggregate credits minus debits equal the settlement amount. A one-subunit difference prevents release.
+Finally, an independent verifier re-reads canonical facts, checks one-to-one use, aggregate proof, thresholds and decision accounting, then produces a SHA-256 receipt. Any failed invariant aborts the result.
 
-Finally, an independent verifier re-reads canonical facts, checks one-to-one use and decision accounting, and signs the run with a SHA-256 receipt. Any failed invariant aborts the result.
+## 2:50–3:40 — Reproduce it and challenge it
 
-## 3:05–3:55 — Adversarial evidence and reproducibility
+[Show Audit trail, then the terminal. Run `npm run eval:holdout`.]
 
-[Show Audit trail, then terminal. Run `npm run eval:holdout`.]
+The repository has this one-command judge path and 21 tests covering ambiguity, duplicates, void invoices, bank debits, merchant and currency boundaries, malformed money and one-subunit proof tampering.
 
-I also challenged the public endpoint with a completely separate Orion pack: six CSVs, every file above 10,000 rows, with 50,000 primary records plus 12,500 settlement-proof rows. It returned 22,000 verified pairs, 6,000 honest exceptions, 100 percent precision and recall, zero false automatic matches, zero silent drops, and the same independent verification receipt as the local engine.
+I also challenged the public API with an independent Orion pack: six CSVs, each above 10,000 rows, totalling 62,500 rows. It returned 22,000 verified pairs, 6,000 honest exceptions, 100 percent precision and recall on generated labels, zero false auto-matches, zero silent drops, and the same receipt as the local engine.
 
-The repository includes a one-command evaluation path and 21 adversarial tests covering ambiguity, duplicate IDs, void invoices, bank debits, merchant and currency boundaries, malformed money, duplicate evidence and one-subunit proof tampering.
+This is reproducible evidence, not a universal claim. Without ground truth, accuracy is null; with labels, it is measured. The hosted summary endpoint accepts up to 100,000 records.
 
-Ground truth is optional. Without labels, accuracy fields are null instead of invented. With labels, precision, recall, F1 and false-auto-match rate are measured. Judges can also use the public OpenAPI contract and a hosted summary mode for batches up to 100,000 records.
+## 3:40–4:30 — The 2 AM failure: what broke and how I got out
 
-## 3:55–4:35 — What broke and how it was fixed
+[Return to Overview, then show the release evidence in the repository.]
 
-[Return to Architecture and point to the failure panel.]
+At 2 AM, the dashboard produced a spectacular throughput number. It was wrong.
 
-The most important failure was false precision. The hosted edge clock froze during execution and originally implied an impossible throughput number. A blind run could also visually look ground-truth verified.
+The engine finished inside one coarse tick of the hosted edge clock, so elapsed time collapsed to zero and the rate became impossible. I also found that a blind run could resemble a scored run. In finance, impressive but false evidence is a correctness failure.
 
-I treated both as correctness bugs. Timing is now nullable when the host clock is unreliable; the dashboard labels either the reproducible local benchmark or browser-observed end-to-end timing. Blind and scored states are separate, match-rate denominators are explicit, and regression tests replay both states on the independent Nova evaluation pack.
+I reproduced it against a monotonic local benchmark and a browser-observed public round trip, then traced every metric to its numerator, denominator and source.
 
-## 4:35–5:00 — Close
+The fix was nullable timing when the clock is untrustworthy, explicit measurement labels, separate blind and scored states, and visible match-rate arithmetic. I added regression tests and replayed Nova and Orion locally and through the public API. The decisions and SHA-256 receipts matched.
 
-[Show Overview, public GitHub link and API-live indicator.]
+That incident changed the product: ClosePilot now refuses to invent performance evidence in exactly the same way it refuses to invent a financial match.
 
-ClosePilot exceeds the Track 04 minimum with multi-source batches, measured throughput, measured accuracy, an honest exception queue, an independent verifier, public source and a judge-testable API.
+## 4:30–5:00 — Close
 
-It does not claim that AI should control money. It demonstrates the safer idea: AI can increase verification capacity while deterministic evidence keeps financial authority bounded.
+[Show Overview, the API-live indicator, OpenAPI link and public GitHub link.]
+
+ClosePilot closes a multi-source finance loop across thousands of records. It reports measured throughput, measured accuracy when labels exist, every exception and a verification receipt. The source is public, the evaluation is one command, and the API is judge-testable.
+
+AI should not control money. ClosePilot demonstrates the safer idea: AI increases verification capacity while deterministic evidence keeps financial authority bounded.
 
 That is ClosePilot. Thank you.

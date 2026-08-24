@@ -10,6 +10,17 @@ ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments,
 - OpenAPI 3.1: https://closepilot-finance.vercel.app/openapi.json
 - Health check: https://closepilot-finance.vercel.app/api/health
 
+## Track 04 proof at a glance
+
+| Required proof | ClosePilot evidence |
+| --- | --- |
+| One closed finance-ops loop | Payments are reconciled to invoices; aggregate settlement proof is reconciled to settlement totals; settlement credits are reconciled to bank transactions. |
+| A batch larger than 50 records | The labelled judge path contains 1,000 primary records. The committed scale run contains 100,000 primary records plus 32,500 proof rows. |
+| Measured accuracy | The labelled holdout reports 100% precision and recall, with the denominator and pair/end-point arithmetic shown below. Unlabelled runs report accuracy as `null`. |
+| Measured throughput | The reproducible 132,500-row development-machine run processes about 12,400 primary-plus-evidence rows per second. Runtime provenance is always labelled. |
+| Honest exceptions | The 1,000-record holdout resolves 960 endpoints and returns 40 exceptions: 10 review and 30 blocked. |
+| Judge-testable delivery | Public source, a one-command local evaluation, downloadable holdout data, OpenAPI 3.1 and a public versioned API are all available above. |
+
 ## What is real
 
 - The UI calls the same versioned `POST /api/v1/reconcile` endpoint available to evaluators.
@@ -21,6 +32,33 @@ ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments,
 - A local Naive Bayes model classifies messy bank narrations. It can provide evidence but cannot authorize a financial decision.
 - A structurally independent second pass verifies match facts, one-to-one use, settlement proof, decision accounting and release thresholds, then emits a SHA-256 receipt.
 - The API does not move money or modify source systems.
+
+## Models interpret; rules authorize
+
+The narration model is deliberately small, local and inspectable. It tokenizes bank text and uses Laplace-smoothed multinomial Naive Bayes to classify six intents: settlement, refund, TDS, fee, payout and unknown. Its isolated 12-phrase holdout is reported separately from reconciliation accuracy, so classifier performance cannot be confused with financial-decision precision.
+
+For settlement-to-bank matching, model output is worth only **3 evidence points** and is counted only when `settlement` confidence is at least 45%. Deterministic evidence carries authority:
+
+- exact UTR: +70
+- settlement reference in the bank feed: +55
+- exact net amount in integer minor units: +25
+- settlement-window evidence: up to +10
+- narration model: at most +3
+
+Automatic release requires at least 85 points, an exact amount, a 10-point lead over the runner-up, and every hard gate to pass. Currency mismatch, merchant-scope mismatch or a bank debit hard-rejects the candidate. Tolerated amount differences can be reviewed but can never be auto-released. Callers may tighten these limits, but the API rejects attempts to weaken the 85-point release threshold or 10-point ambiguity margin.
+
+Illustrative decision trace:
+
+```text
+Bank text:   "RZP merchant settlement UTR-AX91 credited"
+Model:       settlement -> up to +3 evidence points
+Rules:       exact UTR +70; exact net amount +25; date window up to +10
+Authority:   release only if hard gates, threshold and ambiguity checks pass
+Countercase: the same text with a debit, wrong currency, wrong merchant or
+             non-exact amount is rejected or routed to review
+```
+
+The model therefore helps interpret an unstructured field but cannot manufacture identity, repair money or overrule a safety boundary.
 
 ## Reproducible benchmark
 
@@ -90,4 +128,10 @@ The response exposes two deliberately different coverage denominators: `input_re
 
 For multi-currency batches, `value_reconciled` is deliberately `null`; exact totals are returned separately in `value_reconciled_by_currency`.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for safety, scale and production deployment design.
+## Submission artifacts
+
+- [Five-minute pitch](./VIDEO_PITCH.md) — a timed, word-for-word recording script with exact screen actions and the complete 2 AM incident.
+- [Architecture](./ARCHITECTURE.md) — safety boundaries, execution flow, invariants and production scale-out design.
+- [Release evidence](./RELEASE_EVIDENCE.md) — reproducible quality gates and independent stress-test receipts.
+
+The pitch is designed to show the engine running, inspect one messy narration decision, explain why the model cannot authorize money, and answer what broke at 2 AM with symptom, risk, diagnosis, fix and verification.
