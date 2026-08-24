@@ -11,6 +11,7 @@
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "test": "node --experimental-strip-types --test tests/reconciliation.test.ts",
+    "eval:holdout": "node --experimental-strip-types scripts/benchmark.ts 1",
     "benchmark": "node --experimental-strip-types scripts/benchmark.ts"
   },
   "dependencies": {

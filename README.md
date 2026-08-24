@@ -4,6 +4,7 @@ ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments,
 
 ## Live evaluator deployment
 
+- Public repository: https://github.com/souvikDevloper/closepilot
 - App: https://closepilot-finance.vercel.app
 - Evaluation API: https://closepilot-finance.vercel.app/api/v1/reconcile
 - OpenAPI 3.1: https://closepilot-finance.vercel.app/openapi.json
@@ -24,11 +25,15 @@ ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments,
 ## Reproducible benchmark
 
 ```bash
+npm ci
 npm test
+npm run eval:holdout
 npm run benchmark -- 100
 ```
 
-The committed holdout generator produces 1,000 primary records plus 325 Razorpay settlement evidence rows: 480 labelled pairs plus 40 deliberately ambiguous or unmatched primary records. The automated suite also processes a 10,000-primary-record variant and verifies exact money, deterministic receipts, aggregate settlement proof, one-subunit tampering, ambiguity, malformed inputs, duplicate evidence, cross-currency candidates, cross-merchant candidates and bank debits.
+`npm run eval:holdout` is the one-command judge path. It produces 1,000 primary records plus 325 Razorpay settlement evidence rows: 480 labelled pairs and 40 deliberately ambiguous or unmatched primary records. The arithmetic is `1,000 primary = 960 matched endpoints + 40 exceptions`; the 480 pair decisions each resolve two endpoints, and the 325 evidence rows are excluded from the match-rate denominator.
+
+The automated suite also processes a 10,000-primary-record variant and verifies exact money, deterministic receipts, aggregate settlement proof, one-subunit tampering, ambiguity, malformed inputs, duplicate evidence, cross-currency candidates, cross-merchant candidates and bank debits.
 
 Latest local run with 100,000 primary records plus 32,500 settlement evidence rows on the development machine:
 
@@ -40,6 +45,8 @@ Latest local run with 100,000 primary records plus 32,500 settlement evidence ro
 - ~12,400 primary + evidence records/second
 
 Performance is hardware-dependent. These figures describe the committed synthetic benchmark, not an unsupported claim about all external data.
+
+The dashboard preserves that distinction. If the edge runtime cannot provide a trustworthy monotonic duration, the API returns `null`; the UI then shows the documented local benchmark, or a browser-observed end-to-end rate after an interactive run, with the measurement source labelled.
 
 ## Public evaluation API
 

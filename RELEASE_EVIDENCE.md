@@ -4,7 +4,7 @@ Status: **RELEASE CONFIRMED** for repository creation and evaluator deployment.
 
 This confirmation covers the read-only reconciliation agent and public evaluation API. It does not authorize or implement money movement or source-system mutation.
 
-## Final gates — 2026-08-23
+## Final gates — 2026-08-24
 
 - Unit/adversarial suite: 21/21 passing.
 - Static analysis: zero lint errors or warnings.
@@ -48,6 +48,24 @@ The separately generated Nova pack also passed:
 - absent settlement recon evidence was explicitly reported as not evaluated, while a separate supplied-proof smoke test verified one exact closure
 
 The clean public endpoint repeated those blind, scored and supplied-proof results. Its hosted monotonic clock was too coarse to measure the Nova run, so duration and throughput were honestly returned as `null` rather than inferred.
+
+## Independent Orion high-volume gate
+
+The new Orion pack is disjoint from the built-in and Nova datasets. A complete local engine run processed:
+
+- 50,000 primary records across payments, invoices, settlements and bank transactions
+- 12,500 settlement-proof records
+- 62,500 total processed records
+- 22,000 verified pairs and 44,000 resolved endpoints
+- 6,000 explicit exceptions: 1,000 review and 5,000 blocked
+- 88% all-input resolution
+- 100% precision, recall and F1 across 22,000 ground-truth pairs
+- 0 false automatic matches
+- 0 silent drops
+- verifier status `PASS`, including exact settlement proof for all 12,500 settlements
+- engine time 5.08 seconds, approximately 12,308 records/second on this observed run
+
+The Orion workbook, per-source CSV files, direct API request, checksums and verification receipt are distributed as a separate evaluation pack. The web UI automatically requests bounded summary responses above 20,000 submitted source rows while keeping full-batch metrics.
 
 GitHub release gates passed for the judge-honest metrics revision: https://github.com/souvikDevloper/closepilot/actions/runs/32647878627
 

@@ -6,6 +6,23 @@ Minimize false automatic matches, expose every unresolved record and keep AI awa
 
 ## Execution pipeline
 
+```mermaid
+flowchart LR
+    A[CSV / JSON / API] --> B[Schema guard]
+    B --> C[Exact canonical ledger]
+    C --> D[Bounded candidate indexes]
+    C -. messy narration .-> M[Local classifier]
+    M -. evidence only .-> E[Deterministic scorer]
+    D --> E
+    E --> F{Safety gate}
+    F -->|ambiguous| R[Review queue]
+    F -->|low evidence| X[Blocked queue]
+    F -->|eligible| P[Settlement proof]
+    P --> V[Independent verifier]
+    V -->|all invariants pass| O[Measured decisions + SHA-256 receipt]
+    V -->|any invariant fails| Z[Abort release]
+```
+
 1. **Schema guard** — validates stable IDs, ISO-style currency codes, exact amounts, source arrays, options and batch limits. Invalid rows become visible `validation` exceptions.
 2. **Exact canonical ledger** — maps common Razorpay, bank and ledger aliases into currency- and merchant-scoped records backed by integer minor units (`bigint`).
 3. **Narration model** — a measured local Naive Bayes classifier identifies settlement/refund/TDS/fee/payout intent from noisy bank text.
