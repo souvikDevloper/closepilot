@@ -67,6 +67,8 @@ The new Orion pack is disjoint from the built-in and Nova datasets. A complete l
 
 The Orion workbook, per-source CSV files, direct API request, checksums and verification receipt are distributed as a separate evaluation pack. The web UI automatically requests bounded summary responses above 20,000 submitted source rows while keeping full-batch metrics.
 
+The 16.4 MB Orion summary request was then posted to the clean public endpoint. It returned HTTP 200 in 64.5 seconds with the same 62,500-row accounting, metrics, `PASS` status and SHA-256 verification receipt as the local engine.
+
 GitHub release gates passed for the judge-honest metrics revision: https://github.com/souvikDevloper/closepilot/actions/runs/32647878627
 
 The source is published at https://github.com/souvikDevloper/closepilot and the public evaluator deployment is available at https://closepilot-finance.vercel.app.

@@ -52,7 +52,9 @@ Finally, an independent verifier re-reads canonical facts, checks one-to-one use
 
 [Show Audit trail, then terminal. Run `npm run eval:holdout`.]
 
-The repository includes a one-command evaluation path and 21 adversarial tests covering ambiguity, duplicate IDs, void invoices, bank debits, merchant and currency boundaries, malformed money, duplicate settlement evidence and one-subunit proof tampering.
+I also challenged the public endpoint with a completely separate Orion pack: six CSVs, every file above 10,000 rows, with 50,000 primary records plus 12,500 settlement-proof rows. It returned 22,000 verified pairs, 6,000 honest exceptions, 100 percent precision and recall, zero false automatic matches, zero silent drops, and the same independent verification receipt as the local engine.
+
+The repository includes a one-command evaluation path and 21 adversarial tests covering ambiguity, duplicate IDs, void invoices, bank debits, merchant and currency boundaries, malformed money, duplicate evidence and one-subunit proof tampering.
 
 Ground truth is optional. Without labels, accuracy fields are null instead of invented. With labels, precision, recall, F1 and false-auto-match rate are measured. Judges can also use the public OpenAPI contract and a hosted summary mode for batches up to 100,000 records.
 
