@@ -1,5 +1,6 @@
 import { createBenchmarkDataset } from '@/lib/benchmark.ts';
 import { ReconciliationInputError, reconcile, type ReconciliationInput } from '@/lib/reconciliation.ts';
+import { PUBLIC_ORIGIN } from '@/lib/public-origin.ts';
 import { sha256 } from '@/lib/sha256.ts';
 
 export const runtime = 'edge';
@@ -48,9 +49,8 @@ export function OPTIONS() {
 }
 
 export function GET(request: Request) {
-  const endpointUrl = new URL(request.url);
-  endpointUrl.search = '';
-  const endpoint = endpointUrl.toString();
+  void request;
+  const endpoint = `${PUBLIC_ORIGIN}/api/v1/reconcile`;
   return json({
     name:'ClosePilot Reconciliation API',
     version:'3.0.0',

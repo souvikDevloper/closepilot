@@ -1,8 +1,7 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
+import { PUBLIC_ORIGIN } from '@/lib/public-origin.ts';
 import './globals.css';
-
-const siteUrl = process.env.SITE_URL ?? 'http://localhost:3000';
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -15,7 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(siteUrl),
+  metadataBase: new URL(PUBLIC_ORIGIN),
+  alternates: { canonical: '/' },
   title: 'ClosePilot — AI Finance Controller',
   description: 'Explainable, AI-assisted payment reconciliation for modern finance teams.',
   openGraph: {
