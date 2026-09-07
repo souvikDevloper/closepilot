@@ -1,0 +1,14 @@
+flowchart TD
+    userData["CSV / JSON exports"] --> dataLab["Data lab"]
+    caller["External API caller"] --> apiRoute["POST /api/v1/reconcile"]
+    dataLab --> apiRoute
+    apiRoute --> exactFacts["Validate and normalize exact facts"]
+    exactFacts --> candidates["Bounded candidate indexes"]
+    exactFacts -.->|bank narration| model["Local classifier"]
+    model -.->|evidence only| rules["Deterministic safety gates"]
+    candidates --> rules
+    proof["Optional settlement proof"] --> rules
+    rules --> verifier["Second-pass verification"]
+    verifier --> results["Matches, exceptions and receipt"]
+    labels["Optional ground truth"] -.->|evaluation only| metrics["Accuracy metrics"]
+    results --> metrics

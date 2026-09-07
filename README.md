@@ -44,22 +44,9 @@ Open **http://127.0.0.1:3000**. No model API key, bank account or payment creden
 
 ## Architecture at a glance
 
-```mermaid
-flowchart LR
-    userData["CSV / JSON exports"] --> dataLab["Data lab"]
-    caller["External API caller"] --> apiRoute["POST /api/v1/reconcile"]
-    dataLab --> apiRoute
-    apiRoute --> exactFacts["Validate and normalize exact facts"]
-    exactFacts --> candidates["Bounded candidate indexes"]
-    exactFacts -. "bank narration" .-> model["Local classifier"]
-    model -. "evidence only" .-> rules["Deterministic safety gates"]
-    candidates --> rules
-    proof["Optional settlement proof"] --> rules
-    rules --> verifier["Second-pass verification"]
-    verifier --> results["Matches, exceptions and receipt"]
-    labels["Optional ground truth"] -. "evaluation only" .-> metrics["Accuracy metrics"]
-    results --> metrics
-```
+![ClosePilot reconciliation flow: Data lab and API inputs pass through validation, bounded matching, deterministic gates and verification. The classifier supplies evidence only; ground truth only scores results.](./docs/media/architecture-flow.svg)
+
+[Open the full-size diagram](./docs/media/architecture-flow.svg) · [Editable Mermaid source](./docs/diagrams/architecture-flow.mmd)
 
 The verifier shares normalization/scoring code with the matcher: it is defense in depth, not an independently implemented oracle. No queue, database, posting service or authenticated bank connector is implied by this diagram. [Full architecture and invariants →](./ARCHITECTURE.md)
 

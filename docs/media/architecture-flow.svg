@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="1120" viewBox="0 0 1160 1120" role="img" aria-labelledby="diagramTitle diagramDescription">
+  <title id="diagramTitle">ClosePilot read-only reconciliation flow</title>
+  <desc id="diagramDescription">CSV and JSON exports enter through Data lab, or callers use the reconciliation API directly. Records are validated and normalized, then indexed for bounded candidates. The local narration classifier supplies evidence, never authority. Deterministic safety gates use candidate facts and optional settlement proof. A second-pass verifier checks the decisions before returning matches, exceptions and a receipt. Optional ground truth is used only to score accuracy, never to authorize matching.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 Z" fill="#91e8ca"/></marker>
+    <marker id="evidenceArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 Z" fill="#b4a5f5"/></marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; }
+      .heading { fill: #f0f6fc; font-size: 29px; font-weight: 650; }
+      .label { fill: #edf3f9; font-size: 20px; font-weight: 600; text-anchor: middle; }
+      .detail { fill: #a9b8c8; font-size: 17px; text-anchor: middle; }
+      .note { fill: #b4a5f5; font-size: 17px; text-anchor: middle; }
+      .box { fill: #151e28; stroke: #354557; stroke-width: 1.5; }
+      .core { fill: #142c27; stroke: #62bd9f; stroke-width: 1.5; }
+      .aux { fill: #201e31; stroke: #706494; stroke-width: 1.5; }
+      .flow { fill: none; stroke: #91e8ca; stroke-width: 2.5; stroke-linejoin: round; marker-end: url(#arrow); }
+      .evidence { fill: none; stroke: #b4a5f5; stroke-width: 2.5; stroke-dasharray: 6 6; stroke-linejoin: round; marker-end: url(#evidenceArrow); }
+    </style>
+  </defs>
+  <rect width="1160" height="1120" rx="18" fill="#0d1117"/>
+  <text x="40" y="48" class="heading">One batch. Evidence at every step.</text>
+  <text x="40" y="78" fill="#a9b8c8" font-size="18">ClosePilot 3.1 · read-only reconciliation</text>
+
+  <!-- Inputs converge on the same API. -->
+  <path class="flow" d="M 225 180 V 196 H 490 V 215"/>
+  <path class="flow" d="M 935 180 V 196 H 670 V 215"/>
+  <rect class="box" x="65" y="108" width="320" height="72" rx="12"/>
+  <text class="label" x="225" y="138">Data lab</text>
+  <text class="detail" x="225" y="163">CSV / JSON exports</text>
+  <rect class="box" x="775" y="108" width="320" height="72" rx="12"/>
+  <text class="label" x="935" y="138">External API caller</text>
+  <text class="detail" x="935" y="163">Same request contract</text>
+
+  <!-- Deterministic main path. -->
+  <path class="flow" d="M 580 289 V 340"/>
+  <path class="flow" d="M 580 414 V 465"/>
+  <path class="flow" d="M 580 539 V 590"/>
+  <path class="flow" d="M 580 664 V 715"/>
+  <path class="flow" d="M 580 789 V 840"/>
+  <path class="flow" d="M 580 914 V 965"/>
+
+  <rect class="core" x="400" y="215" width="360" height="74" rx="12"/>
+  <text class="label" x="580" y="246">Reconciliation API</text>
+  <text x="580" y="272" fill="#91e8ca" font-family="monospace" font-size="18" text-anchor="middle">POST /api/v1/reconcile</text>
+  <rect class="box" x="400" y="340" width="360" height="74" rx="12"/>
+  <text class="label" x="580" y="371">Validate and normalize</text>
+  <text class="detail" x="580" y="397">Exact money and source facts</text>
+  <rect class="box" x="400" y="465" width="360" height="74" rx="12"/>
+  <text class="label" x="580" y="496">Bounded candidate indexes</text>
+  <text class="detail" x="580" y="522">Identifiers, references and amounts</text>
+  <rect class="core" x="400" y="590" width="360" height="74" rx="12"/>
+  <text class="label" x="580" y="621">Deterministic safety gates</text>
+  <text class="detail" x="580" y="647">Exact facts and ambiguity checks</text>
+  <rect class="core" x="400" y="715" width="360" height="74" rx="12"/>
+  <text class="label" x="580" y="746">Second-pass verification</text>
+  <text class="detail" x="580" y="772">Abort result release on failure</text>
+  <rect class="box" x="400" y="840" width="360" height="74" rx="12"/>
+  <text class="label" x="580" y="871">Matches and exceptions</text>
+  <text class="detail" x="580" y="897">Decisions + SHA-256 receipt</text>
+  <rect class="box" x="400" y="965" width="360" height="74" rx="12"/>
+  <text class="label" x="580" y="996">Accuracy metrics</text>
+  <text class="detail" x="580" y="1022">Unscored when labels are absent</text>
+
+  <!-- Model output is evidence, not matching authority. -->
+  <path class="evidence" d="M 400 377 H 185 V 465"/>
+  <text class="note" x="268" y="442">bank narration</text>
+  <rect class="aux" x="40" y="465" width="290" height="90" rx="12"/>
+  <text class="label" x="185" y="499">Local classifier</text>
+  <text class="detail" x="185" y="529">Narration intent</text>
+  <path class="evidence" d="M 330 510 H 355 V 627 H 400"/>
+  <text class="note" x="243" y="583">evidence only</text>
+
+  <path class="flow" d="M 830 627 H 760"/>
+  <rect class="box" x="830" y="582" width="290" height="90" rx="12"/>
+  <text class="label" x="975" y="615">Settlement proof</text>
+  <text class="detail" x="975" y="645">Optional net-closure evidence</text>
+
+  <!-- Ground truth has no path into the matching gates. -->
+  <path class="evidence" d="M 830 1002 H 760"/>
+  <rect class="aux" x="830" y="957" width="290" height="90" rx="12"/>
+  <text class="label" x="975" y="990">Ground truth</text>
+  <text class="detail" x="975" y="1020">Optional · evaluation only</text>
+
+  <text x="40" y="1088" fill="#a9b8c8" font-size="17">No money movement. No source-record writes.</text>
+</svg>
