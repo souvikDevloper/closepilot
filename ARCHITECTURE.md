@@ -1,6 +1,6 @@
 # ClosePilot architecture
 
-This document describes the isolated 3.1 hardening branch. The submitted/live 3.0 deployment is unchanged. [Verified improvements and open production requirements](./HARDENING_REVIEW.md).
+This document describes engine 3.1 and its read-only evaluation workspace. [Verified improvements and open production requirements](./HARDENING_REVIEW.md). [UI and release checks](./UI_RELEASE_CHECKS.md).
 
 ## Design objective
 

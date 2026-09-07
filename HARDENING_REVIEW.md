@@ -4,9 +4,9 @@ Date: 2026-09-07. Engine 3.1.0, ruleset `closepilot-reconcile-v3.1`, verifier v2
 
 ## Release boundary
 
-This work is isolated on `codex/post-submission-hardening`, starting from submitted commit `7c7d34c0a30251f83a3f7eba076bbbe639b6b8ca`. It is not a revision of the submitted deployment. No merge or production deployment is included.
+This work was developed on `codex/post-submission-hardening`, starting from submitted commit `7c7d34c0a30251f83a3f7eba076bbbe639b6b8ca`. The original submission remains identifiable in Git history. On 2026-09-07 the owner requested a tested merge and an update to the existing public deployment. These are post-submission improvements, not evidence that the original submission contained them.
 
-The public hostname, `envelope/vercel.json` forwarding, `.openai/hosting.json`, and `lib/public-origin.ts` are unchanged. The existing Vercel → Sites route stays in place. Any eventual release needs an explicit deployment decision and confirmation that submission rules permit it.
+The public hostname, `envelope/vercel.json` forwarding, `.openai/hosting.json`, and `lib/public-origin.ts` are unchanged. The existing Vercel → Sites route stays in place. [UI and release checks](./UI_RELEASE_CHECKS.md) record validation of the refreshed workspace. A software release does not establish eligibility for retroactive buildathon judging.
 
 ## Reproduced defects and corrections
 
@@ -54,7 +54,7 @@ Six CSV files generated independently of matcher output, using seed 9072026:
 
 The local browser accepted all six files and showed the expected 60,000 processed rows, 19,200 pairs and 9,600 exceptions. A negative payment's evidence drawer explicitly explained rejection instead of flipping its sign. The same parsing/request helpers are covered by automated CSV → engine and API tests.
 
-The built production server was also tested through the interface: without proof/labels it reported 19,800 pairs and unknown accuracy; adding both produced 19,200 pairs and 9,600 exceptions, with 100% labelled pair precision/recall. Search narrowed a 200-decision summary sample correctly. No browser console errors were reported. CSV content/formula handling is automated-test covered, but the in-app browser did not expose a download-completion event; saved-file delivery still needs confirmation in a normal browser before release.
+The built production server was also tested through the interface: without proof/labels it reported 19,800 pairs and unknown accuracy; adding both produced 19,200 pairs and 9,600 exceptions, with 100% labelled pair precision/recall. Search narrowed a 200-decision summary sample correctly. No browser console errors were reported. During the subsequent UI release checks, CSV delivery was confirmed by parsing the actual saved files: 520 rows for a complete holdout response and 200 rows for the labelled Meridian summary sample. The in-app browser's download event was unreliable; the filesystem check verified delivery independently.
 
 ### Full-engine scale comparison
 

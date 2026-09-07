@@ -1,8 +1,67 @@
+<div align="center">
+
 # ClosePilot
 
-> **Post-submission hardening branch — engine 3.1.0, not deployed.** The submitted `main` commit and the public Vercel → Sites forwarding remain unchanged. The live links below still serve the submitted version. See [hardening evidence and remaining production gaps](./HARDENING_REVIEW.md) before considering a merge.
+### Models interpret. Rules authorize.
 
-ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments, settlement recon items, settlements, bank transactions and invoice ledgers. It turns exported CSV/JSON into explainable matches, aggregate cash-closure proofs, an honest exception queue and reproducible verification receipts.
+An evidence-first reconciliation workspace for payments, invoices, settlements and bank records.
+
+[Open the workspace](https://closepilot-finance.vercel.app) · [API contract](https://closepilot-finance.vercel.app/openapi.json) · [Architecture](./ARCHITECTURE.md) · [Release checks](./UI_RELEASE_CHECKS.md)
+
+</div>
+
+![ClosePilot's Midnight Ledger workspace showing a 60,000-row synthetic evaluation](./docs/media/overview.png)
+
+ClosePilot turns exported CSV/JSON into exact-money matches, an honest exception queue, settlement-closure checks and reproducible verification receipts. Engine **3.1.0** strengthens two-way ambiguity checks, input validation and full-engine performance; the Midnight Ledger interface makes the evidence easier to inspect.
+
+**This is a public, read-only evaluator—not a money-moving or multi-tenant production accounting service.** Use synthetic or non-confidential data. [Known boundaries](#production-boundaries) are part of the design, not fine print.
+
+## See the workflow
+
+![Animated tour of the real Data lab, dashboard, decision explorer and architecture views](./docs/media/workspace-tour.gif)
+
+*A stepped tour assembled from actual local UI captures—not a real-time execution recording. Static views: [Data lab](./docs/media/data-lab.png), [overview](./docs/media/overview.png), [decisions](./docs/media/decisions.png), [architecture](./docs/media/architecture.png).*
+
+1. **Bring the records.** Open **Data lab** and select CSV/JSON files. Supply payments + invoices, settlements + bank transactions, or both.
+2. **Add evidence when available.** Settlement recon items check the settlement net. Ground truth scores matching quality; it never authorizes a match.
+3. **Run the batch.** The interface calls the same public versioned API evaluators can use directly. Selected files finish parsing before submission is enabled.
+4. **Inspect the result.** Review primary-record coverage, labelled precision/recall, measurement source, source coverage and denominator accounting.
+5. **Investigate exceptions.** Search records, filter by source and open the evidence drawer. Export returned decisions; large-run exports are explicitly marked as **samples**.
+6. **Verify the run.** Audit trail exposes the verifier status and receipt. Architecture shows the six recorded execution stages.
+
+## Start locally
+
+Requires Node.js 22.13 or newer.
+
+```bash
+git clone https://github.com/souvikDevloper/closepilot.git
+cd closepilot
+npm ci
+npm run dev -- --port 3000 --hostname 127.0.0.1
+```
+
+Open **http://127.0.0.1:3000**. No model API key, bank account or payment credentials are needed. For a built local server, run `npm run build`, then `npm run start -- --port 3000 --hostname 127.0.0.1`.
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    userData["CSV / JSON exports"] --> dataLab["Data lab"]
+    caller["External API caller"] --> apiRoute["POST /api/v1/reconcile"]
+    dataLab --> apiRoute
+    apiRoute --> exactFacts["Validate and normalize exact facts"]
+    exactFacts --> candidates["Bounded candidate indexes"]
+    exactFacts -. "bank narration" .-> model["Local classifier"]
+    model -. "evidence only" .-> rules["Deterministic safety gates"]
+    candidates --> rules
+    proof["Optional settlement proof"] --> rules
+    rules --> verifier["Second-pass verification"]
+    verifier --> results["Matches, exceptions and receipt"]
+    labels["Optional ground truth"] -. "evaluation only" .-> metrics["Accuracy metrics"]
+    results --> metrics
+```
+
+The verifier shares normalization/scoring code with the matcher: it is defense in depth, not an independently implemented oracle. No queue, database, posting service or authenticated bank connector is implied by this diagram. [Full architecture and invariants →](./ARCHITECTURE.md)
 
 ## Live evaluator deployment
 
@@ -19,14 +78,14 @@ ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments,
 | One closed finance-ops loop | Payments are reconciled to invoices; aggregate settlement proof is reconciled to settlement totals; settlement credits are reconciled to bank transactions. |
 | A batch larger than 50 records | The labelled judge path contains 1,000 primary records. The committed scale run contains 100,000 primary records plus 32,500 proof rows. |
 | Measured accuracy | The labelled holdout reports 100% precision and recall, with the denominator and pair/end-point arithmetic shown below. Unlabelled runs report accuracy as `null`. |
-| Measured throughput | The hardened branch's full-engine 132,500-row local benchmark measured a 4.59-second median across three isolated runs (~28,877 rows/second), including verification and receipt construction. This is not a hosted capacity guarantee. |
+| Measured throughput | The 3.1 full-engine 132,500-row local benchmark measured a 4.59-second median across three isolated runs (~28,877 rows/second), including verification and receipt construction. This is not a hosted capacity guarantee. |
 | Honest exceptions | The 1,000-record holdout resolves 960 endpoints and returns 40 exceptions: 10 review and 30 blocked. |
 | Judge-testable delivery | Public source, a one-command local evaluation, downloadable holdout data, OpenAPI 3.1 and a public versioned API are all available above. |
 
 ## What is real
 
 - The UI calls the same versioned `POST /api/v1/reconcile` endpoint available to evaluators.
-- All dashboard metrics are calculated by the engine for the displayed batch.
+- Batch outcomes come from the real engine. Timing explicitly distinguishes complete-engine duration, browser round trip and a documented local reference benchmark.
 - Money is parsed and summed as exact integer minor units; floating-point values never authorize a decision.
 - Razorpay settlement credits and debits are aggregated by settlement and must close exactly before bank matching is released.
 - Candidate generation uses bounded indexes instead of a Cartesian scan.
@@ -145,6 +204,29 @@ The response exposes two deliberately different coverage denominators: `input_re
 `settlement_recon_items` accepts Razorpay settlement recon rows. `credit`, `debit`, `fee` and `tax` are integer currency subunits. Fees and tax are evidence fields; the authoritative settlement net is `sum(credit - debit)`, so they are not subtracted twice.
 
 For multi-currency batches, `value_reconciled` is deliberately `null`; exact totals are returned separately in `value_reconciled_by_currency`.
+
+## Production boundaries
+
+The current implementation has no durable job/replay store, tenant RBAC, audit database, source authentication, downstream posting or tested hosted concurrency SLA. Summary mode bounds response size, **not** all computation memory. Pairwise matching does not implement split-payment allocation, FX conversion or a refund ledger. The classifier's 12-phrase check is not evidence of unseen-bank generalization.
+
+The published record limit is an admission guard, not a throughput promise. Large production workloads require boundary-aware partitioning, durable jobs and separately authorized posting. See [hardening evidence and remaining requirements](./HARDENING_REVIEW.md).
+
+## Repository guide
+
+| Area | Purpose |
+| --- | --- |
+| `app/closepilot-client.tsx` + `app/globals.css` | All six workspace views, uploads, real request state and accessible evidence dialog |
+| `app/api/v1/reconcile/` | Versioned reconciliation API and input guards |
+| `lib/reconciliation.ts` | Exact-money matching, safety policy, metrics and verification |
+| `lib/data-lab.ts` | Strict CSV/JSON import, request assembly and safe CSV cells |
+| `tests/` | Engine, API, Data lab and adversarial fixture regression tests |
+| `scripts/` | Holdout, scale and Meridian evaluations |
+| `envelope/vercel.json` | Stable public Vercel address forwarding to the existing hosting origin |
+| `docs/media/` | Real UI images and animated walkthrough |
+
+## Release and URL continuity
+
+The public entry point remains **https://closepilot-finance.vercel.app**. Vercel serves as an envelope for the existing hosting origin; the address, forwarding configuration and API path stay unchanged. Publishing updates the existing origin, not the user's bookmark. [UI and release checks](./UI_RELEASE_CHECKS.md) distinguish automated tests, browser verification and hosted limitations.
 
 ## Submission artifacts
 
