@@ -68,6 +68,7 @@ export interface ReconciliationMetrics {
   value_reconciled_decimal: string;
   value_reconciled_by_currency: Array<{ currency:string; minor:string; decimal:string }>;
   duration_ms: number | null;
+  duration_scope: 'engine_including_verification';
   throughput_records_per_second: number | null;
   precision: number | null;
   recall: number | null;
@@ -76,6 +77,7 @@ export interface ReconciliationMetrics {
   ground_truth_pairs: number;
   silent_drops: number;
   narration_classifier_accuracy: number;
+  narration_classifier_holdout_size: number;
 }
 
 export interface VerificationResult {
@@ -163,9 +165,9 @@ interface DomainResult {
   resolvedIds: Set<string>;
 }
 
-const ENGINE_VERSION = '3.0.0';
-const RULESET = 'closepilot-reconcile-v3';
-const VERIFIER_VERSION = 'closepilot-verifier-v1';
+export const ENGINE_VERSION = '3.1.0';
+export const RULESET = 'closepilot-reconcile-v3.1';
+export const VERIFIER_VERSION = 'closepilot-verifier-v2';
 const DEFAULTS: ReconciliationOptions = {
   auto_match_threshold: 85,
   review_threshold: 55,
@@ -175,7 +177,8 @@ const DEFAULTS: ReconciliationOptions = {
   max_candidate_bucket: 64,
 };
 
-const key = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+// Identifiers are opaque. Stripping punctuation can merge distinct references.
+const key = (value: string) => value.trim().toLowerCase();
 const text = (value: unknown) => value == null ? '' : String(value).trim();
 const normalizedHeader = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
 const normalizedDirection = (value:unknown) => {
@@ -203,7 +206,7 @@ function parseDate(value: unknown): number | null {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value === 'number') {
     const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
-    return Number.isFinite(milliseconds) ? milliseconds : null;
+    return Number.isFinite(milliseconds) && Math.abs(milliseconds) <= 8.64e15 ? milliseconds : null;
   }
   const parsed = Date.parse(String(value));
   return Number.isFinite(parsed) ? parsed : null;
@@ -211,8 +214,12 @@ function parseDate(value: unknown): number | null {
 
 function dateLabel(timestamp: number | null) {
   if (timestamp === null) return 'Date unavailable';
-  return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' }).format(timestamp);
+  return recordDateFormatter.format(timestamp);
 }
+
+const recordDateFormatter = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
+const completedPaymentStates = new Set(['captured','paid','settled','success','successful','succeeded','completed']);
+const completedSettlementStates = new Set(['processed','settled','success','successful','succeeded','completed']);
 
 function normalizeRows(rows: RawRecord[], source: RecordSource) {
   const records: CanonicalRecord[] = [];
@@ -245,6 +252,7 @@ function normalizeRows(rows: RawRecord[], source: RecordSource) {
           : ['payment_amount','captured_amount','gross_amount','amount','amount_minor','amount_subunits','amount_paise'];
     let amountEntry = pick(row, amountAliases);
     let inferredBankDirection = '';
+    let bankColumnFailure = '';
     if (source === 'Bank statement') {
       const explicitDirection = normalizedDirection(pick(row, ['type','direction','debit_credit','credit_debit_indicator','dr_cr','transaction_type']));
       const creditEntry = pick(row, ['credit','credit_amount','deposit','deposit_amount']);
@@ -253,6 +261,7 @@ function normalizeRows(rows: RawRecord[], source: RecordSource) {
         try { return value !== undefined && parseMoney(value, currency).minor !== 0n; }
         catch { return false; }
       };
+      if (nonZero(creditEntry) && nonZero(debitEntry)) bankColumnFailure = 'bank row has both non-zero credit and debit';
       if (explicitDirection === 'debit' && debitEntry !== undefined) { amountEntry = debitEntry; inferredBankDirection = 'debit'; }
       else if (nonZero(creditEntry)) { amountEntry = creditEntry; inferredBankDirection = 'credit'; }
       else if (debitEntry !== undefined) { amountEntry = debitEntry; inferredBankDirection = 'debit'; }
@@ -275,16 +284,18 @@ function normalizeRows(rows: RawRecord[], source: RecordSource) {
     try {
       parsedAmount = parseMoney(amountEntry, currency, isMinorEntry);
       if (parsedAmount.minor === 0n) amountFailure = 'amount must be greater than zero';
+      if (source !== 'Bank statement' && parsedAmount.minor < 0n) amountFailure = 'negative amounts require a separate refund or credit-note workflow';
     } catch (error) {
       amountFailure = error instanceof Error ? error.message : 'invalid amount';
     }
     const signedMinor = parsedAmount?.minor ?? 0n;
-    const amountMinor = signedMinor < 0n ? -signedMinor : signedMinor;
+    // Preserve the source sign. Direction labels must never turn an outflow into an inflow.
+    const amountMinor = signedMinor;
     const amountExponent = parsedAmount?.exponent ?? currencyExponent(currency);
     const amount = minorToNumber(amountMinor, amountExponent);
     const timestamp = parseDate(pick(row, ['created_at','createdat','date','transaction_date','transaction_datetime','value_date','posted_at','paid_at','issued_at','settled_at','timestamp']));
-    if (!rawId || !parsedAmount || amountFailure || currencyFailure || unitFailure || duplicate) {
-      const failures = [!rawId ? 'missing stable record ID' : '', amountFailure ? `invalid amount: ${amountFailure}` : '', currencyFailure, unitFailure, duplicate ? 'duplicate record ID' : ''].filter(Boolean);
+    if (!rawId || !parsedAmount || amountFailure || currencyFailure || unitFailure || bankColumnFailure || duplicate) {
+      const failures = [!rawId ? 'missing stable record ID' : '', amountFailure ? `invalid amount: ${amountFailure}` : '', currencyFailure, unitFailure, bankColumnFailure, duplicate ? 'duplicate record ID' : ''].filter(Boolean);
       exceptions.push({
         id,
         source,
@@ -296,7 +307,7 @@ function normalizeRows(rows: RawRecord[], source: RecordSource) {
         confidence: 0,
         date: dateLabel(timestamp),
         reason: `Schema validation failed: ${failures.join(', ')}.`,
-        action: 'Correct the source record and retry with the same idempotency key.',
+        action: 'Correct the source record and rerun reconciliation; this API does not post to source systems.',
         evidence: failures,
         domain: 'validation',
       });
@@ -354,7 +365,18 @@ function daysBetween(a: number | null, b: number | null) {
 
 function containsToken(haystack: string, needle: string) {
   const normalizedNeedle = key(needle);
-  return normalizedNeedle.length >= 5 && key(haystack).includes(normalizedNeedle);
+  if (normalizedNeedle.length < 5) return false;
+  const normalizedHaystack = key(haystack);
+  let from = 0;
+  while (from < normalizedHaystack.length) {
+    const index = normalizedHaystack.indexOf(normalizedNeedle, from);
+    if (index < 0) return false;
+    const before = normalizedHaystack[index - 1] ?? '';
+    const after = normalizedHaystack[index + normalizedNeedle.length] ?? '';
+    if (!/[a-z0-9_-]/.test(before) && !/[a-z0-9_-]/.test(after)) return true;
+    from = index + 1;
+  }
+  return false;
 }
 
 function scorePaymentInvoice(payment: CanonicalRecord, invoice: CanonicalRecord, options: ReconciliationOptions): Candidate {
@@ -362,6 +384,7 @@ function scorePaymentInvoice(payment: CanonicalRecord, invoice: CanonicalRecord,
   const evidence: string[] = [];
   if (payment.currency && invoice.currency && payment.currency !== invoice.currency) return { left:payment,right:invoice,score:0,evidence:['Currency mismatch'],reason:'Currency mismatch',autoEligible:false };
   if (payment.merchantId && invoice.merchantId && key(payment.merchantId) !== key(invoice.merchantId)) return { left:payment,right:invoice,score:0,evidence:['Merchant scope mismatch'],reason:'Merchant scope mismatch',autoEligible:false };
+  if ((payment.invoiceId && key(payment.invoiceId) !== key(invoice.id)) || (invoice.paymentId && key(invoice.paymentId) !== key(payment.id))) return {left:payment,right:invoice,score:0,evidence:['Conflicting direct identifiers'],reason:'Conflicting direct identifiers',autoEligible:false};
   const direct = key(payment.invoiceId) === key(invoice.id) || key(invoice.paymentId) === key(payment.id);
   if (direct) { score += 70; evidence.push('Direct payment ↔ invoice identifier'); }
   if (payment.orderId && invoice.orderId && key(payment.orderId) === key(invoice.orderId)) { score += 42; evidence.push('Order ID exact'); }
@@ -379,7 +402,9 @@ function scorePaymentInvoice(payment: CanonicalRecord, invoice: CanonicalRecord,
   else if (dayGap <= options.date_window_days) { score += 5; evidence.push(`Date within ${options.date_window_days} days`); }
   const invalidStatus = ['void','voided','cancelled','canceled'].includes(invoice.status);
   if (invalidStatus) { score -= 80; evidence.push('Invoice is void or cancelled'); }
-  return { left: payment, right: invoice, score: Math.max(0, Math.min(99, score)), evidence, reason: evidence.join(' · '), autoEligible:amountSafe && !invalidStatus };
+  const paymentStateSafe = !payment.status || completedPaymentStates.has(payment.status);
+  if (!paymentStateSafe) evidence.push(`Payment state ${payment.status} does not prove a completed payment`);
+  return { left: payment, right: invoice, score: Math.max(0, Math.min(99, score)), evidence, reason: evidence.join(' · '), autoEligible:amountSafe && payment.amountMinor > 0n && invoice.amountMinor > 0n && !invalidStatus && paymentStateSafe };
 }
 
 function scoreSettlementBank(settlement: CanonicalRecord, bank: CanonicalRecord, options: ReconciliationOptions): Candidate {
@@ -387,7 +412,8 @@ function scoreSettlementBank(settlement: CanonicalRecord, bank: CanonicalRecord,
   const evidence: string[] = [];
   if (settlement.currency && bank.currency && settlement.currency !== bank.currency) return { left:settlement,right:bank,score:0,evidence:['Currency mismatch'],reason:'Currency mismatch',autoEligible:false };
   if (settlement.merchantId && bank.merchantId && key(settlement.merchantId) !== key(bank.merchantId)) return { left:settlement,right:bank,score:0,evidence:['Merchant scope mismatch'],reason:'Merchant scope mismatch',autoEligible:false };
-  if (['debit','dr','outflow'].includes(bank.direction)) return { left:settlement,right:bank,score:0,evidence:['Bank transaction is not a credit'],reason:'Bank transaction is not a credit',autoEligible:false };
+  if (bank.amountMinor <= 0n || settlement.amountMinor <= 0n || (bank.direction && bank.direction !== 'credit')) return { left:settlement,right:bank,score:0,evidence:['Bank transaction is not a positive credit'],reason:'Bank transaction is not a positive credit',autoEligible:false };
+  if (settlement.utr && bank.utr && key(settlement.utr) !== key(bank.utr)) return {left:settlement,right:bank,score:0,evidence:['Conflicting UTR identifiers'],reason:'Conflicting UTR identifiers',autoEligible:false};
   if (settlement.utr && bank.utr && key(settlement.utr) === key(bank.utr)) { score += 70; evidence.push('UTR exact'); }
   if (containsToken(bank.reference, settlement.id) || containsToken(bank.narration, settlement.id) || containsToken(settlement.reference, bank.id)) { score += 55; evidence.push('Settlement reference found in bank feed'); }
   const variance = absMinor(settlement.amountMinor - bank.amountMinor);
@@ -404,7 +430,9 @@ function scoreSettlementBank(settlement: CanonicalRecord, bank: CanonicalRecord,
     score += 3;
     evidence.push(`Narration model: settlement (${Math.round(classification.confidence * 100)}%)`);
   }
-  return { left: settlement, right: bank, score: Math.max(0, Math.min(99, score)), evidence, reason: evidence.join(' · '), autoEligible:amountSafe };
+  const settlementStateSafe = !settlement.status || completedSettlementStates.has(settlement.status);
+  if (!settlementStateSafe) evidence.push(`Settlement state ${settlement.status} does not prove completion`);
+  return { left: settlement, right: bank, score: Math.max(0, Math.min(99, score)), evidence, reason: evidence.join(' · '), autoEligible:amountSafe && settlementStateSafe };
 }
 
 function buildCandidateGenerator(rights: CanonicalRecord[], options: ReconciliationOptions, domain: 'payment_to_invoice' | 'settlement_to_bank') {
@@ -425,26 +453,28 @@ function buildCandidateGenerator(rights: CanonicalRecord[], options: Reconciliat
     if (record.email) addIndex(byEmail, `${scopeKey(record)}|${key(record.email)}`, record);
     if (record.customerId) addIndex(byCustomer, `${scopeKey(record)}|${key(record.customerId)}`, record);
   });
-  const addBucket = (target: Set<CanonicalRecord>, bucket?: CanonicalRecord[], allowLarge = false) => {
-    if (!bucket || (!allowLarge && bucket.length > options.max_candidate_bucket)) return;
-    bucket.forEach((record) => target.add(record));
-  };
   return (left: CanonicalRecord) => {
     const candidates = new Set<CanonicalRecord>();
+    let overflow = false;
+    const addBucket = (bucket?: CanonicalRecord[]) => {
+      if (!bucket) return;
+      if (bucket.length > options.max_candidate_bucket) { overflow = true; return; }
+      for (const record of bucket) candidates.add(record);
+    };
     if (domain === 'payment_to_invoice') {
-      addBucket(candidates, byId.get(key(left.invoiceId)), true);
-      addBucket(candidates, byPayment.get(key(left.id)), true);
-      if (left.orderId) addBucket(candidates, byOrder.get(`${scopeKey(left)}|${key(left.orderId)}`));
-      if (left.email) addBucket(candidates, byEmail.get(`${scopeKey(left)}|${key(left.email)}`));
-      if (left.customerId) addBucket(candidates, byCustomer.get(`${scopeKey(left)}|${key(left.customerId)}`));
+      addBucket(byId.get(key(left.invoiceId)));
+      addBucket(byPayment.get(key(left.id)));
+      if (left.orderId) addBucket(byOrder.get(`${scopeKey(left)}|${key(left.orderId)}`));
+      if (left.email) addBucket(byEmail.get(`${scopeKey(left)}|${key(left.email)}`));
+      if (left.customerId) addBucket(byCustomer.get(`${scopeKey(left)}|${key(left.customerId)}`));
     } else {
-      addBucket(candidates, byUtr.get(key(left.utr)), true);
-      addBucket(candidates, byId.get(key(left.reference)), true);
+      addBucket(byUtr.get(key(left.utr)));
+      addBucket(byId.get(key(left.reference)));
     }
     const tolerance = toleranceToMinor(options.amount_tolerance, left.amountExponent);
     const bucket = amountBucket(left.amountMinor, tolerance);
-    for (const offset of [-1n, 0n, 1n]) addBucket(candidates, byAmount.get(`${scopeKey(left)}|${bucket + offset}`));
-    return [...candidates];
+    for (const offset of [-1n, 0n, 1n]) addBucket(byAmount.get(`${scopeKey(left)}|${bucket + offset}`));
+    return {candidates:[...candidates],overflow};
   };
 }
 
@@ -460,7 +490,7 @@ function toMatch(candidate: Candidate, domain: DecisionRecord['domain']): Decisi
     confidence: candidate.score,
     date: candidate.left.dateLabel,
     reason: candidate.reason,
-    action: 'Verified automatically; downstream posting remains idempotency-gated.',
+    action: 'Reconciliation verified. Any downstream posting needs a separately authorized, durable workflow.',
     evidence: candidate.evidence,
     domain,
     matched_with: candidate.right.id,
@@ -490,18 +520,19 @@ function toException(record: CanonicalRecord, domain: DecisionRecord['domain'], 
   };
 }
 
-function reconcileDomain(
+function buildProposals(
   lefts: CanonicalRecord[],
   rights: CanonicalRecord[],
   domain: 'payment_to_invoice' | 'settlement_to_bank',
   options: ReconciliationOptions,
   autoBlockedLeftIds = new Set<string>(),
-): DomainResult {
+) {
   const candidateGenerator = buildCandidateGenerator(rights, options, domain);
   const scorer = domain === 'payment_to_invoice' ? scorePaymentInvoice : scoreSettlementBank;
-  const ranked = lefts.map((left) => ({
-    left,
-    candidates: candidateGenerator(left).map((right) => {
+  const reverse = new Map<string, Candidate[]>();
+  const ranked = lefts.map((left) => {
+    const generated = candidateGenerator(left);
+    const candidates = generated.candidates.map((right) => {
       const candidate = scorer(left, right, options);
       if (autoBlockedLeftIds.has(key(left.id))) {
         candidate.autoEligible = false;
@@ -509,33 +540,69 @@ function reconcileDomain(
       }
       return candidate;
     }).filter((candidate) => candidate.score > 0)
-      .sort((a,b) => b.score - a.score || a.right.id.localeCompare(b.right.id)),
-  })).sort((a,b) => (b.candidates[0]?.score ?? 0) - (a.candidates[0]?.score ?? 0) || a.left.id.localeCompare(b.left.id));
+      .sort((a,b) => b.score - a.score || a.right.id.localeCompare(b.right.id));
+    for (const candidate of candidates) {
+      if (!candidate.autoEligible) continue;
+      const rightKey = key(candidate.right.id);
+      const rivals = reverse.get(rightKey) ?? [];
+      rivals.push(candidate);
+      rivals.sort((a,b) => b.score - a.score || a.left.id.localeCompare(b.left.id));
+      if (rivals.length > 2) rivals.length = 2;
+      reverse.set(rightKey, rivals);
+    }
+    // Release and verification need only the forward winner and runner-up.
+    // Every eligible contender has already participated in the reverse index.
+    // Retaining entire candidate graphs would unnecessarily multiply batch memory.
+    return {left,candidates:candidates.slice(0,2),overflow:generated.overflow};
+  }).sort((a,b) => a.left.id.localeCompare(b.left.id));
+  return {ranked,reverse};
+}
+
+function reconcileDomain(
+  lefts: CanonicalRecord[],
+  rights: CanonicalRecord[],
+  domain: 'payment_to_invoice' | 'settlement_to_bank',
+  options: ReconciliationOptions,
+  autoBlockedLeftIds = new Set<string>(),
+): DomainResult {
+  const {ranked,reverse} = buildProposals(lefts, rights, domain, options, autoBlockedLeftIds);
   const usedRight = new Set<string>();
   const resolvedIds = new Set<string>();
   const matches: DecisionRecord[] = [];
   const exceptions: DecisionRecord[] = [];
   for (const item of ranked) {
-    const available = item.candidates.filter((candidate) => !usedRight.has(`${candidate.right.source}:${candidate.right.id}`));
-    const top = available[0];
-    const runnerUp = available[1];
+    // Eligibility is decided against the original graph, never against a graph
+    // made artificially unambiguous by earlier greedy assignments.
+    const top = item.candidates[0];
+    const runnerUp = item.candidates[1];
     const margin = top ? top.score - (runnerUp?.score ?? 0) : 0;
-    if (top && top.autoEligible && top.score >= options.auto_match_threshold && margin >= options.ambiguity_margin) {
+    const rivals = top ? reverse.get(key(top.right.id)) ?? [] : [];
+    const reverseSafe = top && rivals[0]?.left === top.left && top.score - (rivals[1]?.score ?? 0) >= options.ambiguity_margin;
+    if (top && !item.overflow && top.autoEligible && top.score >= options.auto_match_threshold && margin >= options.ambiguity_margin && reverseSafe && !usedRight.has(`${top.right.source}:${top.right.id}`)) {
       usedRight.add(`${top.right.source}:${top.right.id}`);
       resolvedIds.add(`${top.left.source}:${top.left.id}`);
       resolvedIds.add(`${top.right.source}:${top.right.id}`);
       matches.push(toMatch(top, domain));
-    } else if (top && top.score >= options.review_threshold) {
+    } else if (item.overflow || (top && top.score >= options.review_threshold)) {
       const ambiguityEvidence = runnerUp && margin < options.ambiguity_margin ? [`Ambiguous: top two candidates are ${margin} points apart`] : [];
-      if (!top.autoEligible) ambiguityEvidence.push('Hard safety gate: amount or record state is not eligible for automatic posting');
-      top.evidence.push(...ambiguityEvidence);
-      exceptions.push(toException(item.left, domain, 'Review', top, options.review_threshold));
+      if (item.overflow) ambiguityEvidence.push('Candidate collision limit exceeded; incomplete evidence cannot authorize a match');
+      if (top && !reverseSafe && rivals.length > 1) ambiguityEvidence.push('Ambiguous: multiple source records compete for this destination');
+      if (top && !top.autoEligible) ambiguityEvidence.push('Hard safety gate: amount or record state is not eligible for automatic posting');
+      const exception = toException(item.left, domain, 'Review', top, options.review_threshold);
+      exception.evidence = [...exception.evidence,...ambiguityEvidence];
+      exceptions.push(exception);
     } else {
       exceptions.push(toException(item.left, domain, 'Blocked', top, options.review_threshold));
     }
   }
   for (const right of rights) {
-    if (!resolvedIds.has(`${right.source}:${right.id}`)) exceptions.push(toException(right, domain, 'Blocked'));
+    if (!resolvedIds.has(`${right.source}:${right.id}`)) {
+      const rivals = reverse.get(key(right.id)) ?? [];
+      const contested = rivals.length > 1 && rivals[0].score >= options.review_threshold && rivals[0].score - rivals[1].score < options.ambiguity_margin;
+      const exception = toException(right, domain, contested ? 'Review' : 'Blocked');
+      if (contested) exception.evidence = ['Ambiguous: multiple source records compete for this destination'];
+      exceptions.push(exception);
+    }
   }
   return { matches, exceptions, resolvedIds };
 }
@@ -662,7 +729,7 @@ function evaluate(matches: DecisionRecord[], groundTruth: ReconciliationInput['g
   return { precision, recall, f1, falseRate: predicted.size ? falsePositives / predicted.size : 0, truthCount: expected.size, falsePositives, falseNegatives };
 }
 
-function checksum(records: CanonicalRecord[], validationExceptions: DecisionRecord[], closures: SettlementClosure[]) {
+function checksum(records: CanonicalRecord[], validationExceptions: DecisionRecord[], closures: SettlementClosure[], options: ReconciliationOptions) {
   const canonicalRecords = records.map((record) => ({
     source:record.source,
     id:record.id,
@@ -670,11 +737,21 @@ function checksum(records: CanonicalRecord[], validationExceptions: DecisionReco
     currency:record.currency,
     date:record.date ?? null,
     merchant_id:record.merchantId,
+    invoice_id:record.invoiceId,
+    payment_id:record.paymentId,
+    order_id:record.orderId,
+    customer_id:record.customerId,
+    email:record.email,
+    utr:record.utr,
+    reference:record.reference,
+    narration:record.narration,
+    status:record.status,
+    direction:record.direction,
   })).sort((a,b) => a.source.localeCompare(b.source) || a.id.localeCompare(b.id));
   const rejectedRecords = validationExceptions.map((record) => ({source:record.source,id:record.id,amount_minor:record.amount_minor,currency:record.currency,evidence:record.evidence}))
     .sort((a,b) => `${a.source}:${a.id}`.localeCompare(`${b.source}:${b.id}`));
   const proof = closures.map((closure) => ({settlement_id:closure.settlement_id,currency:closure.currency,item_count:closure.item_count,credit_minor:closure.credit_minor,debit_minor:closure.debit_minor,fee_minor:closure.fee_minor,tax_minor:closure.tax_minor,status:closure.status}));
-  return sha256(JSON.stringify({records:canonicalRecords,rejected_records:rejectedRecords,settlement_proof:proof})).slice(0, 16);
+  return sha256(JSON.stringify({ruleset:RULESET,options,records:canonicalRecords,rejected_records:rejectedRecords,settlement_proof:proof})).slice(0, 16);
 }
 
 function independentlyVerify(
@@ -703,10 +780,12 @@ function independentlyVerify(
     used.add(rightKey);
     const sameCurrency = Boolean(left && right && left.currency === right.currency);
     const sameMerchant = Boolean(left && right && (!left.merchantId || !right.merchantId || key(left.merchantId) === key(right.merchantId)));
-    const amountWithinTolerance = Boolean(left && right && left.amountMinor === right.amountMinor);
+    const amountWithinTolerance = Boolean(left && right && left.amountMinor > 0n && right.amountMinor > 0n && left.amountMinor === right.amountMinor);
     const safeState = Boolean(left && right
       && !(rightSource === 'Invoice ledger' && ['void','voided','cancelled','canceled'].includes(right.status))
-      && !(rightSource === 'Bank statement' && ['debit','dr','outflow'].includes(right.direction)));
+      && !(leftSource === 'Razorpay payment' && left.status && !completedPaymentStates.has(left.status))
+      && !(leftSource === 'Razorpay settlement' && left.status && !completedSettlementStates.has(left.status))
+      && !(rightSource === 'Bank statement' && right.direction && right.direction !== 'credit'));
     const decisionExact = Boolean(left && match.amount_minor === left.amountMinor.toString() && match.currency === left.currency);
     if (!left || !right || duplicate || !sameCurrency || !sameMerchant || !amountWithinTolerance || !safeState || !decisionExact) matchFactsValid = false;
   }
@@ -714,11 +793,45 @@ function independentlyVerify(
   check('ONE_TO_ONE', used.size === matches.length * 2, `${used.size} unique endpoints for ${matches.length} pairs`);
   const confidenceGate = matches.every((match) => match.confidence >= options.auto_match_threshold);
   check('CONFIDENCE_GATE', confidenceGate, `Every released match meets the configured ${options.auto_match_threshold}-point threshold`);
+  let evidenceSafe = true;
+  for (const domain of ['payment_to_invoice','settlement_to_bank'] as const) {
+    const proposed = matches.filter((match) => match.domain === domain);
+    if (!proposed.length) continue;
+    const leftSource = domain === 'payment_to_invoice' ? 'Razorpay payment' : 'Razorpay settlement';
+    const rightSource = domain === 'payment_to_invoice' ? 'Invoice ledger' : 'Bank statement';
+    // Rebuild evidence from canonical records rather than trusting the matcher's
+    // chosen endpoints, stored score, or post-assignment candidate availability.
+    const blocked = domain === 'settlement_to_bank' ? new Set(closures.filter((closure) => closure.status !== 'Verified').map((closure) => key(closure.settlement_id))) : new Set<string>();
+    const {ranked,reverse} = buildProposals(records.filter((r) => r.source === leftSource), records.filter((r) => r.source === rightSource), domain, options, blocked);
+    const byLeft = new Map(ranked.map((item) => [key(item.left.id),item]));
+    for (const match of proposed) {
+      const item = byLeft.get(key(match.id));
+      const best = item?.candidates[0];
+      const rivals = best ? reverse.get(key(best.right.id)) ?? [] : [];
+      if (!item || item.overflow || !best || !best.autoEligible
+        || key(best.right.id) !== key(match.matched_with ?? '')
+        || best.score !== match.confidence || best.score < options.auto_match_threshold
+        || best.score - (item.candidates[1]?.score ?? 0) < options.ambiguity_margin
+        || rivals[0]?.left !== best.left
+        || best.score - (rivals[1]?.score ?? 0) < options.ambiguity_margin) evidenceSafe = false;
+    }
+  }
+  check('BIDIRECTIONAL_EVIDENCE', evidenceSafe, 'Scores, source eligibility, collision completeness and ambiguity in both directions re-evaluated before release');
   const coreInputCount = records.length + validationExceptions.length;
   const decisionsAccounted = matches.length * 2 + exceptions.length;
   check('NO_SILENT_DROPS', decisionsAccounted === coreInputCount, `${decisionsAccounted}/${coreInputCount} core records have an explicit decision`);
   const uniqueExceptionEndpoints = new Set(exceptions.map((item) => `${item.source}:${key(item.id)}`));
   check('UNIQUE_DECISIONS', uniqueExceptionEndpoints.size === exceptions.length && [...uniqueExceptionEndpoints].every((endpoint) => !used.has(endpoint)), 'No endpoint is both matched and excepted, or excepted twice');
+  const rejectedByEndpoint = new Map(validationExceptions.map((item) => [`${item.source}:${key(item.id)}`,item]));
+  const exceptionFacts = exceptions.every((item) => {
+    if (!['Review','Blocked'].includes(item.status)) return false;
+    const endpoint = `${item.source}:${key(item.id)}`;
+    const original = bySourceAndId.get(endpoint);
+    const rejected = rejectedByEndpoint.get(endpoint);
+    if (item.domain === 'validation') return Boolean(rejected && item.status === 'Blocked' && item.amount_minor === rejected.amount_minor && item.currency === rejected.currency);
+    return Boolean(original && item.amount_minor === original.amountMinor.toString() && item.currency === original.currency);
+  });
+  check('EXCEPTION_FACTS', exceptionFacts, 'Every exception belongs to an actual normalized or rejected input, with unchanged money and currency');
   const closureSafety = closures.every((closure) => closure.status !== 'Verified' || BigInt(closure.delta_minor) === 0n);
   const proofDetail = closures.length
     ? `${closures.filter((item) => item.status === 'Verified').length}/${closures.length} settlement closures verified without unsafe deltas`
@@ -761,8 +874,7 @@ function coverageFor(source: RecordSource, records: CanonicalRecord[], resolvedI
   return { source, total: sourceRecords.length, resolved, rate: sourceRecords.length ? resolved / sourceRecords.length : 0 };
 }
 
-export function reconcile(input: ReconciliationInput): ReconciliationResult {
-  const started = performance.now();
+function resolveOptions(input: ReconciliationInput) {
   const optionKeys = new Set(['auto_match_threshold','review_threshold','ambiguity_margin','amount_tolerance','date_window_days','max_candidate_bucket']);
   const unknownOptions = Object.keys(input.options ?? {}).filter((option) => !optionKeys.has(option));
   if (unknownOptions.length) throw new ReconciliationInputError(`Unknown reconciliation options: ${unknownOptions.join(', ')}`);
@@ -773,6 +885,35 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
   if (!Number.isFinite(options.amount_tolerance) || options.amount_tolerance < 0 || options.amount_tolerance > 1_000_000) throw new ReconciliationInputError('amount_tolerance must be a finite non-negative amount');
   if (!Number.isFinite(options.date_window_days) || options.date_window_days < 0 || options.date_window_days > 365) throw new ReconciliationInputError('date_window_days must be between 0 and 365');
   if (!Number.isInteger(options.max_candidate_bucket) || options.max_candidate_bucket < 1 || options.max_candidate_bucket > 10_000) throw new ReconciliationInputError('max_candidate_bucket must be an integer between 1 and 10000');
+  return options;
+}
+
+/** Verify externally supplied decisions by reconstructing source facts and candidates. */
+export function verifyProposedResult(input: ReconciliationInput, proposed: Pick<ReconciliationResult,'matches'|'exceptions'|'settlement_closures'|'checksum'>): VerificationResult {
+  const options = resolveOptions(input);
+  const sources = [
+    normalizeRows(input.payments ?? [], 'Razorpay payment'),
+    normalizeRows(input.settlements ?? [], 'Razorpay settlement'),
+    normalizeRows(input.bank_transactions ?? [], 'Bank statement'),
+    normalizeRows(input.invoices ?? [], 'Invoice ledger'),
+  ];
+  const records = sources.flatMap((source) => source.records);
+  const validation = sources.flatMap((source) => source.exceptions);
+  const proof = buildSettlementClosures(input.settlement_recon_items, sources[1].records);
+  const expectedChecksum = checksum(records, validation, proof.closures, options);
+  const result = independentlyVerify(expectedChecksum, records, validation, proposed.matches, proposed.exceptions, proof.closures, options);
+  const addCheck = (code:string,passed:boolean,detail:string) => {
+    result.invariants.push({code,passed,detail});
+    if (!passed) { result.status = 'FAIL'; result.failures.push(`${code}: ${detail}`); }
+  };
+  addCheck('INPUT_CHECKSUM', proposed.checksum === expectedChecksum, 'Receipt is bound to the current canonical facts and policy');
+  addCheck('SUPPLIED_SETTLEMENT_PROOF', JSON.stringify(proposed.settlement_closures) === JSON.stringify(proof.closures), 'Settlement proof reconstructed from supplied source evidence');
+  return result;
+}
+
+export function reconcile(input: ReconciliationInput): ReconciliationResult {
+  const started = performance.now();
+  const options = resolveOptions(input);
   const paymentResult = normalizeRows(input.payments ?? [], 'Razorpay payment');
   const settlementResult = normalizeRows(input.settlements ?? [], 'Razorpay settlement');
   const bankResult = normalizeRows(input.bank_transactions ?? [], 'Bank statement');
@@ -794,15 +935,11 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
   const proofItemCount = input.settlement_recon_items?.length ?? 0;
   const coreInputRecords = (input.payments?.length ?? 0) + (input.settlements?.length ?? 0) + (input.bank_transactions?.length ?? 0) + (input.invoices?.length ?? 0);
   const processedRecords = coreInputRecords + proofItemCount;
-  const measuredDuration = performance.now() - started;
-  // Some edge runtimes freeze or coarsen the monotonic clock during a request. In that
-  // environment, publishing an enormous derived throughput would be false precision.
-  const duration = measuredDuration >= 1 ? measuredDuration : null;
   const matchedRecords = matches.length * 2;
   const reviewRecords = exceptions.filter((record) => record.status === 'Review').length;
   const blockedRecords = exceptions.filter((record) => record.status === 'Blocked').length;
   const generatedAt = new Date().toISOString();
-  const batchChecksum = checksum(allRecords, validationExceptions, settlementProof.closures);
+  const batchChecksum = checksum(allRecords, validationExceptions, settlementProof.closures, options);
   const valueByCurrencyMap = new Map<string,{minor:bigint;exponent:number}>();
   for (const match of matches) {
     const current = valueByCurrencyMap.get(match.currency) ?? {minor:0n,exponent:currencyExponent(match.currency)};
@@ -833,8 +970,9 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
     value_reconciled_minor:singleCurrencyValue?.minor ?? '',
     value_reconciled_decimal:singleCurrencyValue?.decimal ?? '',
     value_reconciled_by_currency:valueByCurrency,
-    duration_ms: duration,
-    throughput_records_per_second: duration === null ? null : processedRecords / (duration / 1000),
+    duration_ms: null,
+    duration_scope: 'engine_including_verification',
+    throughput_records_per_second: null,
     precision: evaluation.precision,
     recall: evaluation.recall,
     f1: evaluation.f1,
@@ -842,9 +980,10 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
     ground_truth_pairs: evaluation.truthCount,
     silent_drops: coreInputRecords - allRecords.length - validationExceptions.length,
     narration_classifier_accuracy: classifierEvaluation.accuracy,
+    narration_classifier_holdout_size: classifierEvaluation.total,
   };
   const now = new Date(generatedAt).toLocaleTimeString('en-GB',{hour12:false,timeZone:'Asia/Kolkata'});
-  return {
+  const result: ReconciliationResult = {
     run_id: `CP-${batchChecksum}`,
     engine_version: ENGINE_VERSION,
     ruleset: RULESET,
@@ -854,11 +993,9 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
     matches,
     exceptions,
     audit: [
-      { time:now, title:'Run completed', copy:duration === null
-        ? `${processedRecords.toLocaleString('en-IN')} primary and evidence records processed; the hosted clock was too coarse for a trustworthy runtime measurement. ${matches.length} pairs verified.`
-        : `${processedRecords.toLocaleString('en-IN')} primary and evidence records processed in ${duration.toFixed(2)} ms; ${matches.length} pairs verified.`, tone:'done' },
+      { time:now, title:'Run completed', copy:'', tone:'done' },
       { time:now, title:'Safety gates applied', copy:`${reviewRecords} records require review and ${blockedRecords} remain blocked. No low-confidence write was executed.`, tone:exceptions.length ? 'warn' : 'done' },
-      { time:now, title:'Narration model evaluated', copy:`Local classifier scored ${(classifierEvaluation.accuracy * 100).toFixed(1)}% on its isolated holdout set.`, tone:'ai' },
+      { time:now, title:'Narration model evaluated', copy:`Local classifier scored ${classifierEvaluation.correct}/${classifierEvaluation.total} on its small synthetic phrase holdout. This is separate from financial-decision accuracy.`, tone:'ai' },
       { time:now, title:'Cross-source indexes built', copy:'Candidate generation used identifier and bounded amount indexes; no Cartesian product scan was performed.', tone:'done' },
       { time:now, title:'Batch accepted', copy:`Ruleset ${RULESET}; checksum ${batchChecksum}; zero silent drops.`, tone:'neutral' },
     ],
@@ -893,6 +1030,16 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
       ],
     },
   };
+  // Measure the complete engine, including checksums, verification and response
+  // assembly. HTTP parsing, JSON encoding and transport are outside this scope.
+  const measuredDuration = performance.now() - started;
+  const duration = measuredDuration >= 1 ? measuredDuration : null;
+  metrics.duration_ms = duration;
+  metrics.throughput_records_per_second = duration === null ? null : processedRecords / (duration / 1000);
+  result.audit[0].copy = duration === null
+    ? `${processedRecords.toLocaleString('en-IN')} primary and evidence records processed; the hosted clock was too coarse for a trustworthy runtime measurement. ${matches.length} pairs verified.`
+    : `${processedRecords.toLocaleString('en-IN')} primary and evidence records processed and verified in ${duration.toFixed(2)} ms; ${matches.length} pairs verified.`;
+  return result;
 }
 
 export const reconciliationDefaults = DEFAULTS;

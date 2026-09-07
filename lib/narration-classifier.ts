@@ -92,8 +92,17 @@ for (const label of classes) {
   classTotals.set(label, total);
 }
 
-export function classifyNarration(value: string): { label: NarrationClass; confidence: number; scores: Record<NarrationClass, number> } {
-  const tokens = tokenize(value);
+export function classifyNarration(value: string): { label: NarrationClass; confidence: number; scores: Record<NarrationClass, number>; abstained:boolean; vocabulary_coverage:number } {
+  const allTokens = tokenize(value);
+  const tokens = allTokens.filter((token) => vocabulary.has(token));
+  const coverage = allTokens.length ? tokens.length / allTokens.length : 0;
+  // Unseen words cannot accumulate spurious confidence merely because class
+  // vocabularies differ in size. Unknown text contributes no matching evidence.
+  if (tokens.length < 2 || coverage < 0.4) return {
+    label:'unknown',confidence:0,
+    scores:Object.fromEntries(classes.map((label) => [label,1 / classes.length])) as Record<NarrationClass,number>,
+    abstained:true,vocabulary_coverage:coverage,
+  };
   const logScores = {} as Record<NarrationClass, number>;
   for (const label of classes) {
     const counts = tokenCounts.get(label)!;
@@ -108,7 +117,7 @@ export function classifyNarration(value: string): { label: NarrationClass; confi
   const scores = {} as Record<NarrationClass, number>;
   classes.forEach((label, index) => { scores[label] = exponentials[index] / denominator; });
   const label = classes.reduce((best, candidate) => scores[candidate] > scores[best] ? candidate : best, classes[0]);
-  return { label, confidence: scores[label], scores };
+  return { label, confidence: scores[label], scores, abstained:false, vocabulary_coverage:coverage };
 }
 
 export function evaluateNarrationClassifier() {

@@ -1,7 +1,7 @@
-import { createBenchmarkDataset } from '@/lib/benchmark.ts';
-import { ReconciliationInputError, reconcile, type ReconciliationInput } from '@/lib/reconciliation.ts';
-import { PUBLIC_ORIGIN } from '@/lib/public-origin.ts';
-import { sha256 } from '@/lib/sha256.ts';
+import { createBenchmarkDataset } from '../../../lib/benchmark.ts';
+import { ENGINE_VERSION, ReconciliationInputError, reconcile, type ReconciliationInput } from '../../../lib/reconciliation.ts';
+import { PUBLIC_ORIGIN } from '../../../lib/public-origin.ts';
+import { sha256 } from '../../../lib/sha256.ts';
 
 export const runtime = 'edge';
 
@@ -53,7 +53,7 @@ export function GET(request: Request) {
   const endpoint = `${PUBLIC_ORIGIN}/api/v1/reconcile`;
   return json({
     name:'ClosePilot Reconciliation API',
-    version:'3.0.0',
+    version:ENGINE_VERSION,
     endpoint,
     method:'POST',
     description:'Exact-money reconciliation for Razorpay payments, invoices, settlement items, settlements and bank transactions. Every automatic decision is independently verified and receipt-hashed.',
@@ -67,7 +67,7 @@ export function GET(request: Request) {
       response_mode:'Optional "full" (default) or "summary"',
     },
     headers:{
-      'Idempotency-Key':'Optional 1-128 character stable key. Reusing it with the same payload returns a stable run identifier.',
+      'Idempotency-Key':'Optional stable run label (1-128 visible ASCII characters). Same canonical facts + policy + key give the same run ID. This read-only endpoint has no durable replay cache or conflict store.',
       'X-API-Key':'Required only when the deployment owner configures CLOSEPILOT_API_KEY.',
     },
     limits:{ maximum_records:MAX_RECORDS, full_response_maximum_records:FULL_RESPONSE_LIMIT, maximum_body_bytes:MAX_BODY_BYTES },
@@ -90,8 +90,25 @@ export async function POST(request: Request) {
   if (idempotencyKey && (idempotencyKey.length > 128 || !/^[\x21-\x7E]+$/.test(idempotencyKey))) return json({error:'invalid_idempotency_key',message:'Idempotency-Key must contain 1-128 visible ASCII characters.'},400);
   let body: unknown;
   try {
-    const rawBody = await request.text();
-    if (new TextEncoder().encode(rawBody).byteLength > MAX_BODY_BYTES) return json({error:'payload_too_large',message:`Request body exceeds ${MAX_BODY_BYTES} bytes.`},413);
+    const reader = request.body?.getReader();
+    const decoder = new TextDecoder('utf-8', {fatal:true});
+    let bytes = 0;
+    let rawBody = '';
+    if (reader) {
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          bytes += chunk.value.byteLength;
+          if (bytes > MAX_BODY_BYTES) {
+            await reader.cancel();
+            return json({error:'payload_too_large',message:`Request body exceeds ${MAX_BODY_BYTES} bytes.`},413);
+          }
+          rawBody += decoder.decode(chunk.value, {stream:true});
+        }
+        rawBody += decoder.decode();
+      } finally { reader.releaseLock(); }
+    }
     body = JSON.parse(rawBody);
   }
   catch { return json({error:'invalid_json',message:'Body must be valid JSON.'},400); }
@@ -104,7 +121,7 @@ export async function POST(request: Request) {
     : envelope;
   if (arrays(input).some((value) => value !== undefined && !Array.isArray(value))) return json({error:'invalid_dataset',message:'Every supplied dataset must be an array of records.'},400);
   if (input.ground_truth !== undefined && !Array.isArray(input.ground_truth)) return json({error:'invalid_ground_truth',message:'ground_truth must be an array.'},400);
-  if (input.ground_truth?.some((pair) => !pair || typeof pair !== 'object' || typeof pair.left_id !== 'string' || typeof pair.right_id !== 'string')) return json({error:'invalid_ground_truth',message:'Every ground_truth entry must contain string left_id and right_id values.'},400);
+  if (input.ground_truth?.some((pair) => !pair || typeof pair !== 'object' || typeof pair.left_id !== 'string' || !pair.left_id.trim() || typeof pair.right_id !== 'string' || !pair.right_id.trim())) return json({error:'invalid_ground_truth',message:'Every ground_truth entry must contain non-empty string left_id and right_id values.'},400);
   if ((input.ground_truth?.length ?? 0) > MAX_RECORDS) return json({error:'ground_truth_limit_exceeded',message:`ground_truth accepts at most ${MAX_RECORDS.toLocaleString('en-IN')} pairs.`},413);
   if (input.options !== undefined && (!input.options || typeof input.options !== 'object' || Array.isArray(input.options))) return json({error:'invalid_options',message:'options must be a JSON object.'},400);
   if (envelope.response_mode !== undefined && !['full','summary'].includes(envelope.response_mode)) return json({error:'invalid_response_mode',message:'response_mode must be full or summary.'},400);

@@ -12,20 +12,27 @@ const K = [
 const rotateRight = (value: number, bits: number) => (value >>> bits) | (value << (32 - bits));
 
 export function sha256(message: string) {
-  const bytes = [...new TextEncoder().encode(message)];
+  // Do not spread UTF-8 into a JavaScript number array: a large receipt then
+  // consumes many times its byte length. Only the final padded block is copied.
+  const bytes = new TextEncoder().encode(message);
   const bitLength = bytes.length * 8;
-  bytes.push(0x80);
-  while (bytes.length % 64 !== 56) bytes.push(0);
+  const completeLength = bytes.length - bytes.length % 64;
+  const tail = new Uint8Array(bytes.length % 64 < 56 ? 64 : 128);
+  tail.set(bytes.subarray(completeLength));
+  tail[bytes.length % 64] = 0x80;
   const high = Math.floor(bitLength / 0x100000000);
   const low = bitLength >>> 0;
-  for (let shift = 24; shift >= 0; shift -= 8) bytes.push((high >>> shift) & 0xff);
-  for (let shift = 24; shift >= 0; shift -= 8) bytes.push((low >>> shift) & 0xff);
+  const tailView = new DataView(tail.buffer);
+  tailView.setUint32(tail.length - 8, high, false);
+  tailView.setUint32(tail.length - 4, low, false);
   const state = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
-  for (let offset = 0; offset < bytes.length; offset += 64) {
-    const words = new Array<number>(64);
+  const words = new Uint32Array(64);
+  for (let offset = 0; offset < completeLength + tail.length; offset += 64) {
+    const chunk = offset < completeLength ? bytes : tail;
+    const chunkOffset = offset < completeLength ? offset : offset - completeLength;
     for (let index = 0; index < 16; index += 1) {
-      const base = offset + index * 4;
-      words[index] = ((bytes[base] << 24) | (bytes[base + 1] << 16) | (bytes[base + 2] << 8) | bytes[base + 3]) >>> 0;
+      const base = chunkOffset + index * 4;
+      words[index] = ((chunk[base] << 24) | (chunk[base + 1] << 16) | (chunk[base + 2] << 8) | chunk[base + 3]) >>> 0;
     }
     for (let index = 16; index < 64; index += 1) {
       const a = words[index - 15];

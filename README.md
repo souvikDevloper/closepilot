@@ -1,5 +1,7 @@
 # ClosePilot
 
+> **Post-submission hardening branch — engine 3.1.0, not deployed.** The submitted `main` commit and the public Vercel → Sites forwarding remain unchanged. The live links below still serve the submitted version. See [hardening evidence and remaining production gaps](./HARDENING_REVIEW.md) before considering a merge.
+
 ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments, settlement recon items, settlements, bank transactions and invoice ledgers. It turns exported CSV/JSON into explainable matches, aggregate cash-closure proofs, an honest exception queue and reproducible verification receipts.
 
 ## Live evaluator deployment
@@ -17,7 +19,7 @@ ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments,
 | One closed finance-ops loop | Payments are reconciled to invoices; aggregate settlement proof is reconciled to settlement totals; settlement credits are reconciled to bank transactions. |
 | A batch larger than 50 records | The labelled judge path contains 1,000 primary records. The committed scale run contains 100,000 primary records plus 32,500 proof rows. |
 | Measured accuracy | The labelled holdout reports 100% precision and recall, with the denominator and pair/end-point arithmetic shown below. Unlabelled runs report accuracy as `null`. |
-| Measured throughput | The reproducible 132,500-row development-machine run processes about 12,400 primary-plus-evidence rows per second. Runtime provenance is always labelled. |
+| Measured throughput | The hardened branch's full-engine 132,500-row local benchmark measured a 4.59-second median across three isolated runs (~28,877 rows/second), including verification and receipt construction. This is not a hosted capacity guarantee. |
 | Honest exceptions | The 1,000-record holdout resolves 960 endpoints and returns 40 exceptions: 10 review and 30 blocked. |
 | Judge-testable delivery | Public source, a one-command local evaluation, downloadable holdout data, OpenAPI 3.1 and a public versioned API are all available above. |
 
@@ -30,12 +32,12 @@ ClosePilot is a bounded, fail-closed reconciliation agent for Razorpay payments,
 - Candidate generation uses bounded indexes instead of a Cartesian scan.
 - Currency, merchant scope, bank direction, duplicate IDs, void invoices, confidence and ambiguity are hard safety gates.
 - A local Naive Bayes model classifies messy bank narrations. It can provide evidence but cannot authorize a financial decision.
-- A structurally independent second pass verifies match facts, one-to-one use, settlement proof, decision accounting and release thresholds, then emits a SHA-256 receipt.
+- A separate verification pass rebuilds candidate evidence and checks both-direction ambiguity, match and exception facts, one-to-one use, settlement proof and decision accounting. It shares normalization/scoring code with the matcher, so it is defense in depth, not a completely independent implementation. The SHA-256 receipt is a reproducibility hash, not an authenticated digital signature.
 - The API does not move money or modify source systems.
 
 ## Models interpret; rules authorize
 
-The narration model is deliberately small, local and inspectable. It tokenizes bank text and uses Laplace-smoothed multinomial Naive Bayes to classify six intents: settlement, refund, TDS, fee, payout and unknown. Its isolated 12-phrase holdout is reported separately from reconciliation accuracy, so classifier performance cannot be confused with financial-decision precision.
+The narration model is deliberately small, local and inspectable: 36 training phrases and a separate 12-phrase synthetic holdout. It uses Laplace-smoothed multinomial Naive Bayes for settlement, refund, TDS, fee, payout and unknown. It abstains when vocabulary coverage is insufficient. The holdout is a smoke check, not evidence of generalization to unseen banks; its percentage must not be confused with reconciliation precision.
 
 For settlement-to-bank matching, model output is worth only **3 evidence points** and is counted only when `settlement` confidence is at least 45%. Deterministic evidence carries authority:
 
@@ -45,7 +47,7 @@ For settlement-to-bank matching, model output is worth only **3 evidence points*
 - settlement-window evidence: up to +10
 - narration model: at most +3
 
-Automatic release requires at least 85 points, an exact amount, a 10-point lead over the runner-up, and every hard gate to pass. Currency mismatch, merchant-scope mismatch or a bank debit hard-rejects the candidate. Tolerated amount differences can be reviewed but can never be auto-released. Callers may tighten these limits, but the API rejects attempts to weaken the 85-point release threshold or 10-point ambiguity margin.
+Automatic release requires at least 85 evidence points (not a probability), an exact positive amount, and a 10-point lead in both source-to-destination and destination-to-source competition. All candidate buckets, including UTRs and direct identifiers, are bounded. Incomplete collision evidence withholds release. Currency/supplied merchant mismatch, conflicting direct identifiers, failed or uncompleted payment/settlement states, and bank debits cannot be outscored. Tolerated amount differences remain review-only. Missing status/merchant fields retain legacy export compatibility; that is not proof of source authenticity or tenant isolation. Dates contribute evidence, rather than imposing a universal invoice-age cutoff.
 
 Illustrative decision trace:
 
@@ -64,25 +66,39 @@ The model therefore helps interpret an unstructured field but cannot manufacture
 
 ```bash
 npm ci
+npm run lint
+npm run typecheck
 npm test
 npm run eval:holdout
 npm run benchmark -- 100
+npm run eval:meridian
+node --experimental-strip-types scripts/compare-engine.ts
 ```
 
 `npm run eval:holdout` is the one-command judge path. It produces 1,000 primary records plus 325 Razorpay settlement evidence rows: 480 labelled pairs and 40 deliberately ambiguous or unmatched primary records. The arithmetic is `1,000 primary = 960 matched endpoints + 40 exceptions`; the 480 pair decisions each resolve two endpoints, and the 325 evidence rows are excluded from the match-rate denominator.
 
 The automated suite also processes a 10,000-primary-record variant and verifies exact money, deterministic receipts, aggregate settlement proof, one-subunit tampering, ambiguity, malformed inputs, duplicate evidence, cross-currency candidates, cross-merchant candidates and bank debits.
 
-Latest local run with 100,000 primary records plus 32,500 settlement evidence rows on the development machine:
+Hardened 3.1 local run with 100,000 primary records plus 32,500 settlement evidence rows on the development machine:
 
 - 48,000 matched pairs
 - 4,000 honest exception records
 - 100% precision and recall on the generated labelled holdout
 - 0 false automatic matches
 - 0 silent drops
-- ~12,400 primary + evidence records/second
+- ~28,877 primary + evidence records/second, median 4.59 seconds for the complete engine
 
-Performance is hardware-dependent. These figures describe the committed synthetic benchmark, not an unsupported claim about all external data.
+Performance is hardware-dependent. These figures describe the committed synthetic benchmark, not all external data. The 132,500-row run is a local CLI stress test above the hosted API's 100,000-record guard. Whole Node-process peak RSS was approximately 456 MiB; this is not a validated 128 MiB edge-worker workload. See [full timing methodology and production blockers](./HARDENING_REVIEW.md).
+
+The fresh Meridian fixture exercises 48,000 primary rows plus 12,000 settlement proof rows, with independently specified labels: 19,200 pairs, 9,600 exceptions, 80% input resolution, and 100% pair precision/recall on this synthetic fixture. Ground truth changes evaluation only. Withholding settlement proof is a different evidence condition and has a separate expected label set.
+
+Generate the six Data lab upload files with:
+
+```bash
+node --experimental-strip-types scripts/evaluate-meridian.ts 12000 --export
+```
+
+Upload each file from `outputs/meridian/` to its named Data lab source. Ground truth and settlement proof are optional. Rejects remain in primary accounting. CSV imports reject malformed rows, duplicate headers and invalid labels; large summary exports are clearly marked as samples, not full audit downloads.
 
 The dashboard preserves that distinction. If the edge runtime cannot provide a trustworthy monotonic duration, the API returns `null`; the UI then shows the documented local benchmark, or a browser-observed end-to-end rate after an interactive run, with the measurement source labelled.
 
@@ -104,7 +120,9 @@ Useful endpoints:
 - `GET /openapi.json` — OpenAPI description
 - `GET /api/health` — health and engine version
 
-The hosted API accepts up to 100,000 records in `summary` mode. Full decision responses are capped at 20,000 records to keep response size bounded. Larger production workloads should be sharded by merchant, currency and settlement date.
+The API admission guards accept up to 100,000 primary-plus-proof records in `summary` mode, with a streamed 20 MiB body limit. Full responses are capped at 20,000 records. Summary mode bounds the returned collections, not the computation's memory. These limits are guards, not promises of latency, concurrency or edge-memory capacity. Oversized production workloads need durable jobs and boundary-aware partitioning that preserves all candidate relationships.
+
+`Idempotency-Key` labels a deterministic run; it does **not** provide a durable replay cache, changed-payload conflict store, exactly-once processing or posting. A deployment may configure `CLOSEPILOT_API_KEY` for a shared API key, but tenant RBAC, durable audit storage, rate limiting and authenticated source connectors are not implemented. Do not upload confidential live financial records to the public demonstration service.
 
 ## Request contract
 

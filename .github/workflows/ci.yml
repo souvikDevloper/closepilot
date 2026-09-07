@@ -2,7 +2,7 @@ name: release-gates
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/post-submission-hardening]
   pull_request:
 
 permissions:
@@ -20,6 +20,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      - run: npm run typecheck
       - run: npm test
       - run: npm run benchmark -- 10
+      - run: npm run eval:meridian
       - run: npm run build

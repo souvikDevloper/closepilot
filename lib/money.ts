@@ -24,6 +24,7 @@ function normalizedMoneyText(value: unknown) {
   if (typeof value !== 'string') throw new Error('amount must be a number or string');
   let candidate = value.trim();
   if (!candidate) throw new Error('amount is empty');
+  if (candidate.length > 128) throw new Error('amount representation is too long');
   const accountingNegative = /^\(.*\)$/.test(candidate);
   if (accountingNegative) candidate = candidate.slice(1, -1);
   if (/\d\s+\d/.test(candidate)) throw new Error('amount contains whitespace between digits');

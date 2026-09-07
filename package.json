@@ -10,9 +10,11 @@
     "build": "vinext build",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "test": "node --experimental-strip-types --test tests/reconciliation.test.ts",
+    "typecheck": "tsc --noEmit --incremental false",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
     "eval:holdout": "node --experimental-strip-types scripts/benchmark.ts 1",
-    "benchmark": "node --experimental-strip-types scripts/benchmark.ts"
+    "benchmark": "node --experimental-strip-types scripts/benchmark.ts",
+    "eval:meridian": "node --experimental-strip-types scripts/evaluate-meridian.ts"
   },
   "dependencies": {
     "next": "16.2.6",

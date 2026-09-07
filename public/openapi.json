@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ClosePilot Reconciliation API",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "description": "Fail-closed finance-ops reconciliation with exact minor-unit arithmetic, aggregate Razorpay settlement proofing, deterministic decisions and independent SHA-256 verification receipts. This self-hosted specification is free to import into Postman, Insomnia or an API client generator."
   },
   "servers": [{ "url": "/", "description": "Current ClosePilot deployment" }],
@@ -19,7 +19,7 @@
         "description": "Matches payments to invoices and settlements to bank credits. If settlement_recon_items are supplied, their aggregate net must exactly close to each settlement before it may auto-match.",
         "security": [{ "ApiKeyAuth": [] }, {}],
         "parameters": [
-          { "name": "Idempotency-Key", "in": "header", "required": false, "description": "Visible ASCII, at most 128 characters.", "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+          { "name": "Idempotency-Key", "in": "header", "required": false, "description": "Stable run label; visible ASCII, at most 128 characters. This read-only evaluator has no durable replay cache or conflict store.", "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
         ],
         "requestBody": {
           "required": true,
@@ -174,7 +174,8 @@
           "value_reconciled_minor": { "type": "string" },
           "value_reconciled_decimal": { "type": "string" },
           "value_reconciled_by_currency": { "type": "array", "items": { "type": "object", "required": ["currency", "minor", "decimal"], "properties": { "currency": { "type": "string" }, "minor": { "type": "string" }, "decimal": { "type": "string" } } } },
-          "duration_ms": { "type": ["number", "null"], "minimum": 0, "description": "Measured engine time, or null when the host clock is too coarse for a trustworthy measurement." },
+          "duration_ms": { "type": ["number", "null"], "minimum": 0, "description": "Complete engine time including checksumming, verification and result assembly. Excludes HTTP parsing, JSON encoding and transport. Null when the clock is too coarse." },
+          "duration_scope": { "type": "string", "const": "engine_including_verification" },
           "throughput_records_per_second": { "type": ["number", "null"], "minimum": 0, "description": "Derived only from a trustworthy duration; otherwise null." },
           "precision": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Null when ground truth is not supplied." },
           "recall": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Null when ground truth is not supplied." },
@@ -182,7 +183,8 @@
           "false_auto_match_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Null when ground truth is not supplied." },
           "ground_truth_pairs": { "type": "integer", "minimum": 0 },
           "silent_drops": { "type": "integer", "minimum": 0 },
-          "narration_classifier_accuracy": { "type": "number", "minimum": 0, "maximum": 1 }
+          "narration_classifier_accuracy": { "type": "number", "minimum": 0, "maximum": 1 },
+          "narration_classifier_holdout_size": { "type": "integer", "minimum": 0, "description": "Number of phrases in the small synthetic classifier holdout; not a financial accuracy benchmark." }
         }
       },
       "ReconciliationResult": {
